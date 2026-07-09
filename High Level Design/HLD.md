@@ -82,6 +82,7 @@
 | 40 | Design an Event-Driven System | Kafka vs RabbitMQ, event sourcing, CQRS, saga, outbox, CDC |
 | 41 | Design a Real-Time Streaming Platform | Lambda/Kappa, Flink, windowing, fraud detection, IoT |
 | 42 | Design AI/ML-Based Services | Recommendations, generative AI (LLM serving), RAG pipelines |
+| 43 | Design Gmail | Consistency, availability, ACID transactions, multi-device sync, search indexing |
 
 ### Part VIII - Appendices
 
@@ -39834,6 +39835,800 @@ THREE SYSTEMS COMPARED
     batching, model quantization, tiered model routing (send simple queries to
     small models, complex to large), and aggressive caching can reduce costs by
     5-10x without measurable quality loss.
+
+---
+
+*This chapter is part of [Part VII — Real-World Case Studies](../INDEX.md)*
+
+
+
+# Chapter 43: Design Gmail — Consistency, Availability & Multi-Device Sync
+
+## 1. Problem Statement
+
+Design a **global email system** serving 1.8B+ users across web, mobile, and TV platforms with:
+
+- **Consistency guarantee:** Message ordering, state updates, label changes must be strongly consistent
+- **Availability:** 99.99% uptime across 6 continents  
+- **Multi-device sync:** Drafts, folders, labels sync instantly across 5+ devices
+- **Scalability:** 5M emails/second ingestion, 100M concurrent connections
+- **Search:** Full-text search over 200B emails with sub-second latency
+- **Low latency:** Mail delivery <30 seconds, UI loads <1 second on 2G networks
+
+```
++───────────────────────────────────────────────────────────────+
+|                     GMAIL SYSTEM LANDSCAPE                    |
++───────────────────────────────────────────────────────────────+
+|                                                               |
+|  Users across web, mobile, TV expect:                        |
+|  • Instant sync: Draft saved on phone, visible on desktop   |
+|  • Message ordering: Threads never show out-of-order         |
+|  • No duplicates: Crash during send doesn't create 2 emails  |
+|  • Rich search: 200B emails, "from:alice has:attachment"    |
+|  • Offline access: 1000 emails cached, sync when connected  |
+|  • Push notifications: New mail, calendar invite alerts       |
+|                                                               |
++───────────────────────────────────────────────────────────────+
+```
+
+**Unique Challenges:**
+
+1. **Consistency ∩ Availability conflict:** ACID transactions guarantee strong consistency but hurt availability
+2. **Multi-device sync:** Devices may conflict (e.g., archive message on phone, undo on desktop at same time)
+3. **Search over time-series data:** Billions of emails indexed with user-defined filters
+4. **Legacy support:** 15+ year old mailboxes need to load in <1 second
+5. **Diverse platforms:** Web browser, native iOS/Android, Gmail TV, IMAP, POP3 protocols
+6. **Storage at scale:** Average 25GB per user × 1.8B users = **45 exabytes**
+
+---
+
+## 2. Requirements
+
+### Functional Requirements
+
+| Feature | Details |
+|---------|---------|
+| **Send Email** | Compose, attach files, schedule, send via SMTP/API |
+| **Receive Email** | Deliver from SMTP, spam/phishing filtering, threading |
+| **Thread/Conversation** | Group related messages, preserve order, collapse/expand |
+| **Labels & Folders** | Custom labels, system folders (Inbox, Sent, Drafts, Spam) |
+| **Search** | Full-text search, advanced filters (from:, has:, before:, cc:) |
+| **Attachment** | Store files up to 25MB, preview (docs, images), scan for viruses |
+| **Multi-device sync** | Sync state across 5+ devices, handle offline changes |
+| **Push notifications** | New mail, meeting invites, security alerts in real-time |
+| **Backup & Recovery** | Delete recovery (30-day bin), user-initiated exports |
+| **Access Control** | OAuth2 authentication, 2FA, session management |
+| **Standards Support** | IMAP, POP3, CalDAV, CardDAV for third-party clients |
+
+### Non-Functional Requirements
+
+| Metric | Target | Notes |
+|--------|--------|-------|
+| **Availability** | 99.99% (52 min/year downtime) | Multi-region failover |
+| **Mail Delivery Latency** | P50: 100ms, P99: 5s | From SMTP submission to inbox |
+| **Search Latency** | P50: 200ms, P99: 2s | Full-text search over personal mailbox |
+| **Sync Latency** | <500ms | Drafts, labels, read status across devices |
+| **UI Load Time** | <1s on 4G, <3s on 2G | Initial load, pagination |
+| **Storage Efficiency** | <500GB average per user | Compression, dedup, archival |
+| **Message Ordering** | Strict FIFO per thread | No out-of-order delivery |
+| **Consistency Model** | Strong ACID for mutations | Eventual consistency for reads (with bounded staleness) |
+| **Concurrent Users** | 100M simultaneous | Peak hours |
+
+---
+
+## 3. Capacity Estimation
+
+### Traffic Assumptions
+- **Users:** 1.8 billion
+- **Active daily:** 400 million (WAU)
+- **Concurrent peak:** 100 million
+- **Email volume:** 300+ billion emails/day
+- **Read-to-write ratio:** 100:1 (most users read more than send)
+
+### Bandwidth & Storage
+
+```
+Write Traffic (email ingestion):
+  5M emails/sec × 50KB avg = 250 GB/sec inbound
+  → Requires 2,000+ Gbps network capacity with compression
+
+Read Traffic (inbox loads, search):
+  100M concurrent × 10 inbox reads/sec = 1B reads/sec
+  → Requires massive cache hierarchy (L1 + L2)
+
+Storage:
+  400M users × 25GB avg = 10 exabytes (cold + hot)
+  → Google uses custom datacenter infrastructure
+```
+
+---
+
+## 4. High-Level Architecture
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                    USERS (Web, Mobile, TV)                       │
+└────────┬─────────────────────────────────────────────────────┬───┘
+         │                                                       │
+    ┌────▼────────────────────────────────────────────────┬────▼───┐
+    │         GMAIL API GATEWAY (Multi-region)            │        │
+    │  • Rate limiting (10K reqs/sec per user)            │  IMAP  │
+    │  • Request routing (geo-distributed)                │  POP3  │
+    │  • TLS 1.3 termination                              │ Proxy  │
+    └────┬─────────────┬─────────────────────┬────────────┴────────┘
+         │             │                     │
+    ┌────▼──┐    ┌────▼──┐    ┌────────────▼──────┐
+    │ Write  │    │ Read   │    │ Search/Index      │
+    │ Path   │    │ Path   │    │ Service           │
+    │Service │    │Service │    │                   │
+    └────┬──┘    └────┬──┘    └────────────┬──────┘
+         │            │                     │
+    ┌────▼────────────▼──────────────────────▼──────────────┐
+    │         DATA LAYER (CONSISTENCY FOCUS)                │
+    │                                                       │
+    │  ┌─────────────────────────────────────────────────┐ │
+    │  │ Mailstore (Spanner-like ACID DB)               │ │
+    │  │ • Messages (MessageID, ThreadID, Body, From)   │ │
+    │  │ • Threads (ThreadID, Participants, Subject)    │ │
+    │  │ • Labels (LabelID, UserID, Name, Color)        │ │
+    │  │ • State (MessageID, UserID, Read, Archived)    │ │
+    │  └─────────────────────────────────────────────────┘ │
+    │                                                       │
+    │  ┌─────────────────────────────────────────────────┐ │
+    │  │ Search Index (Elasticsearch-like)               │ │
+    │  │ • Inverted index: term → MessageIDs             │ │
+    │  │ • Per-user indexes for access control           │ │
+    │  └─────────────────────────────────────────────────┘ │
+    │                                                       │
+    │  ┌─────────────────────────────────────────────────┐ │
+    │  │ Cache Layer (Redis)                             │ │
+    │  │ • L1: User session cache (inbox metadata)       │ │
+    │  │ • L2: Global message cache (recent emails)      │ │
+    │  └─────────────────────────────────────────────────┘ │
+    │                                                       │
+    │  ┌─────────────────────────────────────────────────┐ │
+    │  │ Blob Storage (Google Cloud Storage equivalent)  │ │
+    │  │ • Message bodies (immutable)                    │ │
+    │  │ • Attachments (replicated 3x)                   │ │
+    │  └─────────────────────────────────────────────────┘ │
+    └───────────────────────────────────────────────────────┘
+         │                │                 │
+    ┌────▼────┐    ┌─────▼────┐    ┌──────▼──────┐
+    │DC (US)  │    │DC (EU)   │    │DC (Asia)    │
+    │Replica 1│    │Replica 2 │    │Replica 3    │
+    └─────────┘    └──────────┘    └─────────────┘
+         │                │                 │
+         └────────┬───────┴─────────┬───────┘
+                  │                 │
+              Multi-leader replication with Conflict-free Replicated Data Types (CRDTs)
+```
+
+---
+
+## 5. Detailed Design
+
+### 5.1 Data Model
+
+#### Core Entities
+
+```sql
+-- Messages are immutable, identified by MessageID
+CREATE TABLE Messages (
+    MessageID BIGINT PRIMARY KEY,
+    ThreadID BIGINT NOT NULL,           -- Groups related emails
+    FromAddress STRING NOT NULL,        -- Sender email
+    ToAddresses ARRAY<STRING>,          -- Recipients
+    CcAddresses ARRAY<STRING>,
+    BccAddresses ARRAY<STRING>,
+    Subject STRING,
+    Body BYTES,                         -- Stored in Blob Storage
+    BodyTextIndex STRING,               -- Denormalized for search
+    Headers BYTES,                      -- Raw SMTP headers
+    CreatedTime TIMESTAMP NOT NULL,     -- When email was sent
+    ReceivedTime TIMESTAMP NOT NULL,    -- When server received it
+    MessageSize INT,                    -- Bytes for quota tracking
+    IsSpam BOOL DEFAULT FALSE,
+    Score FLOAT,                        -- Spam/Phishing score
+    FOREIGN KEY (ThreadID) REFERENCES Threads(ThreadID)
+);
+
+-- Threads group conversations
+CREATE TABLE Threads (
+    ThreadID BIGINT PRIMARY KEY,
+    UserID BIGINT NOT NULL,
+    Participants ARRAY<STRING>,         -- All email addresses in thread
+    Subject STRING,
+    FirstMessageTime TIMESTAMP,
+    LastMessageTime TIMESTAMP,
+    MessageCount INT,
+    UnreadCount INT,
+    UNIQUE (UserID, ThreadID)           -- Each user has unique thread ID
+);
+
+-- User state (read, starred, archived, label)
+CREATE TABLE MessageState (
+    UserID BIGINT NOT NULL,
+    MessageID BIGINT NOT NULL,
+    Read BOOL DEFAULT FALSE,
+    Starred BOOL DEFAULT FALSE,
+    Archived BOOL DEFAULT FALSE,
+    Spam BOOL DEFAULT FALSE,
+    Deleted BOOL DEFAULT FALSE,
+    Labels ARRAY<STRING>,               -- Custom label names
+    LastModifiedTime TIMESTAMP,
+    PRIMARY KEY (UserID, MessageID),
+    INDEX (UserID, LastModifiedTime)    -- For sync
+);
+
+-- Labels are user-defined
+CREATE TABLE Labels (
+    LabelID BIGINT PRIMARY KEY,
+    UserID BIGINT NOT NULL,
+    Name STRING NOT NULL,
+    Color STRING,
+    MessageCount INT,
+    UNIQUE (UserID, Name)
+);
+
+-- Drafts are WIP, stored in mailstore with special flag
+CREATE TABLE Drafts (
+    DraftID BIGINT PRIMARY KEY,
+    UserID BIGINT NOT NULL,
+    Subject STRING,
+    To ARRAY<STRING>,
+    Cc ARRAY<STRING>,
+    Bcc ARRAY<STRING>,
+    Body STRING,
+    Attachments ARRAY<AttachmentMetadata>,
+    LastModifiedTime TIMESTAMP,
+    CreatedTime TIMESTAMP,
+    PRIMARY KEY (UserID, DraftID),
+    INDEX (UserID, LastModifiedTime)
+);
+```
+
+**Why this schema:**
+- **MessageID globally unique:** Ensures deduplication across regions
+- **ThreadID per-user:** Two users see different thread IDs for same conversation (privacy)
+- **MessageState separate:** Mutations don't touch immutable Message record (cheaper)
+- **Denormalized BodyTextIndex:** Accelerates search without consulting blob storage
+
+### 5.2 Consistency Model: ACID for Writes, Eventual for Reads
+
+**Key insight:** Gmail chooses **strong consistency** for writes (via distributed transactions) and **eventual consistency with bounded staleness** for reads (via caching).
+
+#### Write Path: Strong ACID Consistency
+
+When a user sends an email, we execute:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ User clicks "Send"                                          │
+└─────────────────────────────────────┬───────────────────────┘
+                                      │
+                          ┌───────────▼──────────────┐
+                          │ BEGIN DISTRIBUTED TX     │
+                          │ (2-phase commit)         │
+                          └───────────┬──────────────┘
+                                      │
+                    ┌─────────────────┼────────────────┬─────────┐
+                    │                 │                │         │
+        ┌───────────▼────────┐ ┌─────▼──────┐ ┌─────▼──┐ ┌────▼──────┐
+        │ (1) Allocate       │ │ (2) Write  │ │ (3) Log│ │ (4) Send  │
+        │ MessageID via      │ │ Message   │ │ Message│ │ to SMTP  │
+        │ Spanner sequence   │ │ to primary│ │ to     │ │          │
+        │                    │ │ mailstore │ │ Durable│ │          │
+        │ DC-US: 9999999     │ │           │ │ log    │ │          │
+        └────────────────────┘ └───────────┘ └────────┘ └──────────┘
+                    │                 │                │         │
+                    └─────────────────┼────────────────┴─────────┘
+                                      │
+                          ┌───────────▼──────────────┐
+                          │ PREPARE (all regions)    │
+                          │ • Validate constraints   │
+                          │ • Lock rows              │
+                          │ • Get votes (commit/no)  │
+                          └───────────┬──────────────┘
+                                      │
+                    ┌─────────────────┼────────────────┐
+                    │ All vote YES?   │                │
+                    └─────────────────┼────────────────┘
+                          YES         │         NO
+                          │           │         │
+        ┌─────────────────▼──┐    ┌───▼────────▼──────────┐
+        │ COMMIT             │    │ ROLLBACK             │
+        │ • Apply to DB      │    │ • Undo all changes   │
+        │ • Release locks    │    │ • Return to user: err│
+        │ • Async replicate  │    └──────────────────────┘
+        │   to other DCs     │
+        └────────────────────┘
+                 │
+      ┌──────────▼──────────────────────────────────────┐
+      │ Return to client: "Email sent"                  │
+      │ (Write durability guaranteed before response)   │
+      └─────────────────────────────────────────────────┘
+```
+
+**Guarantee:** Once client gets "sent" response, message is durably stored in all regions and won't be lost.
+
+**Latency trade-off:**
+- P50: 500ms (waiting for 2PC across 3 datacenters)
+- P99: 3s (when a datacenter is slow)
+
+#### Read Path: Eventual Consistency with Cache
+
+Reads are fast because we exploit **eventual consistency:**
+
+```
+User clicks "Inbox"
+       │
+       ├─→ Query: SELECT Threads FROM ThreadCache
+       │   (L1 cache, 100ms fresh)
+       │
+       │   Cache miss? Query Mailstore
+       │   └─→ SELECT Threads FROM Threads
+       │       WHERE UserID = X ORDER BY LastMessageTime DESC
+       │
+       │       (P99: 200ms from primary, might see write 1s old)
+       │
+       └─→ Return threads immediately to client
+           (Data is 0-1 second stale, unnoticeable to user)
+
+Concurrent write on different device:
+       │
+       ├─→ WRITE: UPDATE MessageState SET Read = TRUE
+       │   (Committed to Spanner primary)
+       │
+       └─→ Invalidate cache key + broadcast event
+           All clients receive update within 500ms
+```
+
+**Why this works:**
+1. Reads hit cache (memcached/Redis) first — instant
+2. Cache invalidation is asynchronous (soft consistency)
+3. Brief windows of inconsistency (1-2 seconds) are invisible to users
+4. After 2 seconds, all replicas converge to same state
+
+### 5.3 Multi-Device Sync: CRDT-Based Conflict Resolution
+
+Gmail supports 3 scenarios simultaneously:
+
+**Scenario 1: Online sync (both devices connected)**
+```
+Device A: Mark as read
+  ├─ Write: UPDATE MessageState SET Read = TRUE WHERE MessageID = M1
+  ├─ Distributed transaction to Spanner
+  └─ Broadcast event: {MessageID: M1, Read: TRUE}
+     │
+     Device B receives event within 500ms
+     └─ Apply to local cache + UI update (star appears)
+```
+
+**Scenario 2: Offline sync (both change local, then sync)**
+```
+Device A (offline):        Device B (online):
+  │                           │
+  ├─ Star M1                  ├─ Archive M1
+  │ (local-only)              │ (writes to server)
+  │                           │
+  ├─ Later online              │
+  └─ Sync: {M1: {             │
+      Star: TRUE,          ┌───┘
+      Starred_Time: T1,    │
+      DeviceID: phone}     │
+                           │
+                   Server receives both:
+                   ├─ Archive from B at time T2
+                   └─ Star from A at time T1
+                
+                   Last-writer-wins: T2 > T1
+                   → Archive wins, but Star retained
+                   → Final state: Archived=TRUE, Starred=TRUE
+                   (User sees: archived but starred)
+```
+
+**Why "last-writer-wins" works:**
+- Users understand that **last action wins** in UI applications
+- Rarely causes confusion (both actions happen, latest one "visible")
+
+**But for critical fields, use CRDT:**
+
+```
+-- For label changes (set semantics)
+Labels: [USER_CREATED_LABEL_1, USER_CREATED_LABEL_2]
+
+Device A adds LABEL_1:  {action: ADD, label: LABEL_1, time: T1, deviceID: phone}
+Device B adds LABEL_2:  {action: ADD, label: LABEL_2, time: T2, deviceID: desktop}
+
+Merge function (CRDT): SET union
+  → Result: [LABEL_1, LABEL_2] (both labels applied)
+  → No conflict! Both users happy.
+```
+
+### 5.4 Search Architecture: Elasticsearch
+
+```
+┌────────────────────────────────────────────────────────┐
+│ User enters: "from:alice has:attachment before:2024"  │
+└────────────┬───────────────────────────────────────────┘
+             │
+        ┌────▼─────────────────────────────────┐
+        │ Search Service (stateless)           │
+        │ • Parse query                        │
+        │ • Validate user can access results   │
+        │ • Route to shard                     │
+        └────┬──────────────────────────────────┘
+             │
+        ┌────▼──────────────────────────────────────────────┐
+        │ Elasticsearch (per-user indexes)                  │
+        │                                                   │
+        │ Index name: gmail_alice_v2                        │
+        │ ├─ Shards: 10 (100M emails each)                  │
+        │ ├─ Replicas: 2 (for high availability)            │
+        │ │                                                  │
+        │ └─ Mappings:                                       │
+        │    ├─ from (keyword)    → Term dictionary         │
+        │    ├─ to (keyword)      → Term dictionary         │
+        │    ├─ subject (text)    → Analyzed (stemming)     │
+        │    ├─ body (text)       → Analyzed (stemming)     │
+        │    ├─ attachments (bool)→ Binary flag              │
+        │    ├─ timestamp (date)  → Range queries           │
+        │    └─ labels (keyword)  → Multi-valued            │
+        └─────────────────────────────────────────────────┘
+             │
+        ┌────▼──────────────────────────────────┐
+        │ Query execution:                      │
+        │ • Shard 1: from=alice AND has=file   │
+        │ • Shard 2: from=alice AND has=file   │
+        │ ...                                   │
+        │ • Merge results, apply before:2024   │
+        │ • Sort by relevance                  │
+        └────┬─────────────────────────────────┘
+             │
+        ┌────▼──────────────────────────────────┐
+        │ Return (MessageID, Score) pairs       │
+        │ Fetch full message from primary store │
+        │ (early termination if >100 results)   │
+        └──────────────────────────────────────┘
+```
+
+**Index strategy:**
+- Per-user indexes (alice has no visibility into bob's emails, so separate index)
+- ~10B emails/shard (balance: search speed vs. hardware)
+- Refresh rate: 1 minute (new email visible within 60s of send)
+- Replicas: 2x (if primary shard down, replica takes over)
+
+**Index size:** 200B emails × 5KB metadata per email = **1 petabyte** of search indexes
+
+### 5.5 Multi-Device Sync Protocol
+
+```
+Device A (Mobile)          Network          Device B (Desktop)
+         │                   │                     │
+         │◄──── Inbox synced, last_sync=T1 ────┤
+         │                                         │
+         ├── User marks M1 as read                 │
+         │   Local update: read = TRUE             │
+         │   Upload change: {msg:M1, read:TRUE}    │
+         │                                         │
+         ├────── POST /sync ────────────────────────►
+         │                                         │
+         │                                   Server receives
+         │                                   ├─ Persist to DB
+         │                                   ├─ Publish event
+         │                                   └─ Return OK + new_sync_token
+         │                                         │
+         │                              ◄─ Return 200 OK ────┤
+         │                                         │
+         │                                   Server → PubSub
+         │                                   topic: user_123/changes
+         │                                   msg: {M1: read=TRUE}
+         │                                         │
+         │       ◄────── Event delivered <─────────┤
+         │       (WebSocket or long-poll)          │
+         │                                     Apply locally
+         │                                     Render UI change
+         │
+  Device reconnects after
+  being offline:
+         ├─ Request: /sync?last_sync=T1
+         │         ───────────────────────────────►
+         │                                  Return all changes since T1
+         │         ◄────────────────────────────────
+         │       Batch apply to local DB
+         └─ UI reconciles conflicts
+```
+
+**How offline works:**
+1. Client caches 1000 most recent emails + labels locally (SQLite)
+2. When offline, all mutations written to local DB only
+3. On reconnect, batch upload all local changes
+4. Server applies via distributed transaction, handles conflicts
+5. Client receives merged state back
+
+### 5.6 Multi-Platform Support
+
+#### Web Browser
+```
+Gmail Web UI
+  ├─ Initial load: 2.5MB gzipped JS
+  ├─ Lazy load: Remaining emails on scroll
+  └─ Protocol: HTTP/2, WebSocket for real-time (fallback: long-poll)
+```
+
+#### Mobile (iOS/Android)
+```
+Native app
+  ├─ Efficient: ~10KB per email (vs 50KB for web)
+  ├─ Offline: SQLite DB for 1000 emails
+  ├─ Sync: Smart sync (only headers first, body on view)
+  └─ Push notifications: FCM (Android), APNs (iOS)
+```
+
+#### Gmail TV (AndroidTV/SmartTV)
+```
+Simplified UI
+  ├─ 10-foot interface: Large touch targets
+  ├─ Performance: Load inbox in <500ms
+  ├─ Limited features: Read-only for emails (compose via companion app)
+  ├─ Data: Only 100 most recent emails cached
+  └─ Voice control: "Ok Google, read my latest email"
+```
+
+---
+
+## 6. Handling Key Challenges
+
+### Challenge 1: Consistency ∩ Availability (CAP Theorem)
+
+**Gmail's approach:** Choose **Consistency** and **Partition Tolerance**, sacrifice some Availability temporarily.
+
+```
+┌─────────────────────────────────────────────────────────┐
+│ Google Spanner (NewSQL database)                        │
+├─────────────────────────────────────────────────────────┤
+│ • Synchronized clocks (GPS + atomic clocks)             │
+│ • Lock-free reads (TrueTime API)                        │
+│ • Multi-region replication with ACID transactions       │
+│                                                         │
+│ Guarantee: Stronger than eventual consistency           │
+│ but better availability than traditional 2PC           │
+│                                                         │
+│ When US datacenter fails:                               │
+│ ├─ Failover to EU/Asia in <30s                          │
+│ └─ No message loss (all replicated)                     │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Challenge 2: Search Performance Over Billions of Emails
+
+**Problem:** Elasticsearch on 200B emails would be slow if indexed naively.
+
+**Solution: Hierarchical search**
+
+```
+Search query: "from:alice"
+
+Step 1: Bloom filter (in-memory)
+  ├─ Does alice exist in any shard? → YES
+  └─ Skip shards where alice not present
+
+Step 2: Time-based pruning
+  ├─ Query specifies date range?
+  ├─ Skip shards outside range
+  └─ Example: "before:2024-01-01" skips 2024 data entirely
+
+Step 3: Execute on relevant shards only
+  └─ Aggregate results
+
+Result: 10x faster due to pruned search space
+```
+
+### Challenge 3: Concurrent Edits (Drafts)
+
+**Problem:** User A and B both editing same draft simultaneously—who wins?
+
+**Solution: Operational Transformation (OT) or CRDT**
+
+```
+Draft: "Hello, my name is Alice"
+             │                │
+        Device A          Device B
+        Edit: Delete "my"  Edit: Delete "Alice"
+             │                │
+             ▼                ▼
+      "Hello, name is Alice"  "Hello, my name is "
+             │                │
+             └────────┬───────┘
+                      │
+              Reconcile using OT:
+              ├─ Transform A edits relative to B
+              ├─ Transform B edits relative to A
+              └─ Final: "Hello, name is " (both deletions applied)
+```
+
+**In practice:** Gmail uses OT for Draft collaborative editing (like Google Docs).
+
+### Challenge 4: IMAP Sync Lag
+
+**Problem:** IMAP clients (Thunderbird, Outlook) expect instant `\Seen` flag reflection but Gmail's eventual consistency adds 2s lag.
+
+**Solution: Client-side caching + flag shadowing**
+
+```
+Thunderbird → Gmail IMAP Proxy
+     │
+     ├─ Mark message as read
+     ├─ Flag applied to local cache immediately
+     └─ SMTP async write to backend
+        
+When backend sync completes:
+     └─ Update IMAP proxy's flag state
+        (Thunderbird already shows read, no flicker)
+```
+
+---
+
+## 7. Data Consistency Guarantees
+
+### Consistency Levels Offered
+
+| Operation | Consistency | Why |
+|-----------|-------------|-----|
+| **Send email** | Strong ACID | Must never lose message, no duplicates |
+| **Update labels** | Strong ACID | User expects "archive" to stick |
+| **Mark read** | Eventual (1-2s) | Brief inconsistency invisible |
+| **Search** | Eventual (up to 60s) | Acceptable for search (new mail in 60s) |
+| **Sync to device** | Eventual (500ms) | Fast enough for users |
+
+### Replica Consistency
+
+```
+Primary Datacenter (US):
+  ├─ Receives write
+  ├─ Applies to local DB
+  ├─ Writes to replication log
+  └─ Returns "OK" to client ✓
+
+Replication to EU DC (async):
+  ├─ Consume from log
+  ├─ Apply to DB (eventually)
+  └─ Lag: P50 = 50ms, P99 = 500ms
+
+Replication to Asia DC (async):
+  ├─ Consume from log
+  ├─ Apply to DB
+  └─ Lag: P50 = 100ms, P99 = 1s
+```
+
+**What if US DC fails?**
+```
+Failover sequence:
+  1. Health check detects US DC unavailable (5s)
+  2. DNS updated to point to EU DC (10s propagation)
+  3. EU takes over as primary, Asia as replica
+  4. Any commits pending in US log → replayed
+  Total downtime: 15-30 seconds
+```
+
+---
+
+## 8. Scalability Patterns
+
+### Sharding Strategy
+
+Gmail doesn't shard by UserID. Instead:
+
+```
+TimeID-based sharding:
+  ├─ Shard 0: MessageID in range [0, 1B]         (Emails from 2018-2020)
+  ├─ Shard 1: MessageID in range [1B, 2B]        (Emails from 2020-2022)
+  ├─ Shard 2: MessageID in range [2B, 3B]        (Emails from 2022-2024)
+  └─ Shard N: MessageID in range [NB, (N+1)B]    (Current emails)
+
+Benefit:
+  • Recent emails (hot) in latest shard
+  • Can provision more CPU/SSD to recent shard
+  • Archival emails (cold) in early shards
+  • Can compress/move to cheaper storage
+  • No skewed distribution per user
+```
+
+### Caching Hierarchy
+
+```
+L1 Cache (Per-device, in-app):
+  ├─ 1000 recent emails (SQLite, mobile)
+  ├─ 100 emails metadata (browser JS)
+  └─ TTL: Until sync conflicts detected
+
+L2 Cache (Redis cluster, region-wide):
+  ├─ 50M mailboxes × 100 threads each
+  ├─ Inbox thread list (user's view)
+  ├─ TTL: 5 minutes
+  └─ Hit rate: 95% (most people re-open inbox)
+
+L3 Cache (Memcached, datacenter-wide):
+  ├─ Hot message bodies (recent, popular forwards)
+  ├─ Label lists
+  ├─ TTL: 10 minutes
+  └─ Hit rate: 70%
+
+L4 Database (Persistent, replicated):
+  ├─ All messages, authoritative
+  ├─ Queried if L1-L3 miss
+  └─ P99 latency: 200ms
+```
+
+---
+
+## 9. Failure Scenarios & Recovery
+
+### Scenario: Primary DC Down (Earthquake in US)
+
+```
+t=0s:   Earthquake hits Google US datacenter
+t=5s:   Health checks fail, trigger failover
+t=10s:  DNS change propagates
+t=15s:  EU DC becomes primary
+        
+Status:
+├─ EU can handle 2x traffic (over-provisioned)
+├─ Some requests fail during 15s window (users see retry dialog)
+├─ No message loss (already replicated)
+├─ No duplicate sends (2PC ensures exactly-once)
+└─ Read consistency: EU catchup, then serve (might be 2s stale)
+```
+
+### Scenario: Spam Detection Failure (Overly Aggressive)
+
+```
+If spam filter marks legitimate emails as spam:
+
+Immediate action:
+├─ Monitor alerts detect high false-positive rate
+├─ Rollback spam model to previous version
+├─ Affected users: emails recovery within 30 minutes
+
+Architecture supports recovery because:
+├─ Spam flag in MessageState (separate from Message)
+├─ Can quickly toggle flags without deleting emails
+└─ 30-day recovery bin allows users to rescue emails
+```
+
+---
+
+## 10. Key Takeaways
+
+| Aspect | Decision | Why |
+|--------|----------|-----|
+| **Consistency Model** | Strong for writes (ACID), eventual for reads | Balances durability vs. performance |
+| **Data Store** | NewSQL (Spanner-like) + Blob storage + Elasticsearch | Each technology specializes: transactions, storage, search |
+| **Replication** | Multi-leader per region, async to other regions | Maximizes local write performance + global consistency |
+| **Caching** | 4-level hierarchy (device, region, DC, DB) | Different hit rates for different tiers |
+| **Search** | Per-user Elasticsearch indexes | Privacy + performance isolation |
+| **Conflict resolution** | Last-writer-wins + CRDT for sets | Pragmatic: users tolerate it |
+| **Multi-device sync** | Event-based + eventual consistent | Bounded staleness (500ms for mobile) |
+| **Failover** | 15-30s automatic failover via DNS | Acceptable downtime, no data loss |
+| **Storage** | Time-based sharding + hierarchical storage | Hot data (recent) on SSD, cold data archived |
+
+---
+
+## 11. Interview Tips
+
+**For 16+ year experienced Java engineers:**
+
+1. **Discuss CAP theorem trade-offs:** Most candidates say "choose 2 of 3" → wrong. Gmail chose all 3 with **nuance:** Strong consistency for important writes, eventual for reads.
+
+2. **Explain ACID in distributed systems:** Spanner solves this via TrueTime + 2PC. Traditional databases use 2PC which is slow.
+
+3. **Show understanding of multi-device sync:** Mention CRDTs, operational transformation, or last-writer-wins. Avoid "just sync everything."
+
+4. **Database choice:** Why not MongoDB? It's eventually consistent by default. Gmail needs ACID transactions.
+
+5. **Search at scale:** Don't say "use Elasticsearch for everything." Explain sharding strategies, caching, and when to query what.
+
+6. **Handle criticism:** If interviewer says "Gmail should use Kafka for all state," respond: "Kafka is for events, not for ACID transactions. Gmail needs both."
 
 ---
 
