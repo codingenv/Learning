@@ -13,6 +13,10 @@
 3. [Collections Framework](#3-collections-framework)
    - [Q16: HashMap internals — load factor, hash collisions](#q16-hashmap-internals--load-factor-hash-collisions)
    - [Q16 Extended: HashMap Internals — Complete Deep Dive](#q16-extended-hashmap-internals--complete-deep-dive)
+   - [Q20A: HashMap — Complete Interview Deep Dive (16+ years level)](#q20a-hashmap--complete-interview-deep-dive)
+   - [Q20B: HashSet — How it uses HashMap internally](#q20b-hashset--how-it-uses-hashmap-internally)
+   - [Q20C: ConcurrentHashMap — Internal mechanics and all interview questions](#q20c-concurrenthashmap--internal-mechanics)
+   - [Q20D: WeakHashMap — When and why to use it](#q20d-weakhashmap--when-and-why)
 4. [Multithreading and Concurrency](#4-multithreading-and-concurrency)
 5. [Exception Handling](#5-exception-handling)
 6. [Generics](#6-generics)
@@ -770,6 +774,608 @@ for (String s : list) {
 // list now has extra "d" entries but iterator didn't see them
 // Best for: read-heavy, rarely-written collections (event listeners, observer lists)
 ```
+
+---
+
+## HashMap, HashSet, ConcurrentHashMap, and WeakHashMap — Complete Deep Dive
+
+---
+
+### Q20A: HashMap — Complete Interview Deep Dive
+
+#### Internal Structure
+
+```
+HashMap = Node<K,V>[] table  (default capacity: 16)
+
+Each bucket can hold:
+  null               → empty slot
+  single Node        → no collision
+  LinkedList of Nodes → collision (bucket size ≤ 8)
+  TreeNode (Red-Black Tree) → treeified when bucket size > 8 AND table size ≥ 64
+
+Node structure:
+  int    hash;   // cached hash, avoids recompute on resize
+  K      key;
+  V      value;
+  Node   next;   // linked list pointer
+```
+
+#### How `put(K key, V value)` Works Step by Step
+
+```java
+// Step 1: hash the key
+int h = key.hashCode();
+int hash = h ^ (h >>> 16);   // XOR upper 16 bits into lower 16 (spread high bits)
+// WHY: table index = hash & (capacity - 1). Without spreading, high bits are ignored.
+// Keys with same lower 16 bits would all land in same bucket → clustering
+
+// Step 2: compute bucket index
+int index = hash & (capacity - 1);  // capacity always power-of-2, so this = hash % capacity
+
+// Step 3: handle bucket
+if (bucket[index] == null) {
+    bucket[index] = new Node(hash, key, value, null);  // no collision, done
+} else {
+    // traverse chain: find existing key or append new node
+    for (Node e = bucket[index]; e != null; e = e.next) {
+        if (e.hash == hash && (e.key == key || key.equals(e.key))) {
+            e.value = value;   // update existing key
+            return;
+        }
+    }
+    // key not found → append (Java 8: append to tail, not head)
+    // if bucket size ≥ 8 → treeify
+}
+
+// Step 4: resize if needed
+if (++size > threshold) resize();  // threshold = capacity * loadFactor (default 0.75)
+// resize doubles capacity, rehashes all entries (expensive O(n) operation)
+```
+
+#### Resize (Rehash) — The Hidden Cost
+
+```
+Initial: capacity=16, threshold=12  (16 × 0.75)
+After 12th put → resize to 32, threshold=24
+After 24th put → resize to 64, threshold=48
+...
+
+Each resize:
+  - Allocates new array double the size
+  - Iterates all existing nodes
+  - Recomputes bucket index for each (hash & newCapacity-1)
+  - O(n) time — can cause latency spikes under load
+
+PRE-SIZE when final size is known:
+Map<String, Order> map = new HashMap<>(10_000 * 4/3 + 1);  // no resize up to 10K entries
+// Java 19+:
+Map<String, Order> map = HashMap.newHashMap(10_000);  // static factory, handles the math
+```
+
+#### Treeification — Why and When
+
+```
+Before Java 8: collision bucket was always a LinkedList
+Problem: hash flooding attack — attacker crafts keys with identical hashCode()
+         → all keys land in one bucket → O(1) becomes O(n) → DoS
+
+Java 8 fix: when bucket size > 8 AND table capacity ≥ 64:
+  LinkedList → Red-Black Tree (self-balancing BST)
+  O(n) worst case → O(log n) worst case
+
+When bucket size drops below 6 during removal: un-treeify back to linked list
+Why 8/6 and not same threshold? Hysteresis — avoids thrashing between tree and list
+```
+
+#### `equals()` and `hashCode()` Contract — Critical
+
+```java
+// THE CONTRACT: if a.equals(b) → a.hashCode() == b.hashCode()
+// Violation example:
+class BrokenKey {
+    String name;
+    @Override public boolean equals(Object o) {
+        return o instanceof BrokenKey bk && bk.name.equals(this.name);
+    }
+    // NO hashCode override → uses Object.hashCode() (identity-based)
+}
+
+Map<BrokenKey, String> map = new HashMap<>();
+BrokenKey k1 = new BrokenKey("user1");
+map.put(k1, "Alice");
+
+BrokenKey k2 = new BrokenKey("user1");  // logically equal to k1
+map.get(k2);  // returns NULL — k2 has different hashCode → different bucket!
+
+// Correct implementation:
+@Override public int hashCode() { return Objects.hash(name); }
+// Now k1.hashCode() == k2.hashCode() && k1.equals(k2) → get(k2) returns "Alice"
+```
+
+#### All HashMap Interview Questions (16+ Year Level)
+
+**Q: What is the default initial capacity and load factor of HashMap?**
+- Default capacity: **16** (must be power of 2 for bitwise index calculation)
+- Default load factor: **0.75** (empirically optimal — balances space vs time using Poisson distribution)
+- Threshold = capacity × loadFactor = 16 × 0.75 = **12** (resize triggers at 12th entry)
+
+**Q: Why must HashMap capacity always be a power of 2?**
+- Index = `hash & (capacity - 1)`. When capacity is power of 2, `capacity - 1` is all 1s in binary.
+- This makes `&` equivalent to `% capacity` but 5-10× faster (no division).
+- If you pass `new HashMap<>(10)`, Java rounds up to 16 internally.
+
+**Q: What happens when two keys have the same hashCode?**
+- Called a **hash collision**. Both keys land in the same bucket.
+- Java 8+: stored as a linked list (≤8 entries) or Red-Black Tree (>8 entries).
+- `equals()` is used to distinguish the two keys within the bucket.
+
+**Q: Can HashMap have null keys and null values?**
+- **Yes** — one null key (stored in bucket 0), multiple null values.
+- `HashTable` does NOT allow null keys or values (legacy, synchronized).
+- `ConcurrentHashMap` does NOT allow null keys or values (ambiguity — can't distinguish "absent" from "value is null").
+
+**Q: Is HashMap ordered?**
+- No. Iteration order is undefined and can change on resize.
+- Use `LinkedHashMap` for insertion order, `TreeMap` for sorted order.
+
+**Q: Is HashMap thread-safe?**
+- No. Concurrent modifications can cause:
+  - Infinite loop (pre-Java 8, two threads resizing simultaneously → circular linked list)
+  - Data loss (Java 8+, but still not safe)
+- Use `ConcurrentHashMap` for thread safety.
+
+**Q: What is the time complexity of HashMap operations?**
+
+| Operation | Average | Worst Case (all keys same bucket) |
+|---|---|---|
+| `get` | O(1) | O(log n) with Java 8 treeification |
+| `put` | O(1) | O(log n) |
+| `remove` | O(1) | O(log n) |
+| Iteration | O(n + capacity) | O(n + capacity) |
+
+**Q: What is the difference between `get()` returning null vs key not present?**
+```java
+map.put("key", null);
+map.get("key");       // returns null — key EXISTS with null value
+map.get("other");     // returns null — key DOES NOT EXIST
+
+// To distinguish:
+map.containsKey("key");   // true
+map.containsKey("other"); // false
+map.getOrDefault("key", "default");   // returns null (value is null)
+map.getOrDefault("other", "default"); // returns "default"
+```
+
+**Q: How do you iterate a HashMap? What's the most efficient way?**
+```java
+Map<String, Integer> map = new HashMap<>();
+
+// 1. entrySet() — MOST EFFICIENT for key+value access
+for (Map.Entry<String, Integer> entry : map.entrySet()) {
+    System.out.println(entry.getKey() + "=" + entry.getValue());
+}
+
+// 2. forEach (Java 8)
+map.forEach((k, v) -> System.out.println(k + "=" + v));
+
+// 3. keySet() — only if you need keys (avoids Entry object creation)
+for (String key : map.keySet()) { ... }
+
+// AVOID: map.keySet() then map.get(key) — O(1) per get but wastes time vs entrySet()
+```
+
+**Q: Explain `compute()`, `computeIfAbsent()`, `computeIfPresent()`, `merge()`**
+```java
+Map<String, List<String>> grouped = new HashMap<>();
+
+// computeIfAbsent — create value only if key absent (great for multi-maps)
+grouped.computeIfAbsent("fruits", k -> new ArrayList<>()).add("apple");
+grouped.computeIfAbsent("fruits", k -> new ArrayList<>()).add("mango");
+// grouped = {fruits=[apple, mango]}
+
+// compute — update value for existing key
+Map<String, Integer> wordCount = new HashMap<>();
+wordCount.compute("hello", (k, v) -> v == null ? 1 : v + 1);
+
+// merge — combine old and new value with a function (cleaner for counting)
+wordCount.merge("hello", 1, Integer::sum);  // same as compute above, cleaner
+
+// Real use: word frequency counter
+String[] words = "the cat sat on the mat".split(" ");
+Map<String, Long> freq = new HashMap<>();
+for (String w : words) freq.merge(w, 1L, Long::sum);
+// freq = {the=2, cat=1, sat=1, on=1, mat=1}
+```
+
+**Q: How would you sort a HashMap by value?**
+```java
+Map<String, Integer> scores = Map.of("Alice", 90, "Bob", 85, "Charlie", 95);
+
+// Sort by value descending
+List<Map.Entry<String, Integer>> sorted = scores.entrySet().stream()
+    .sorted(Map.Entry.<String, Integer>comparingByValue().reversed())
+    .collect(Collectors.toList());
+// Result: Charlie=95, Alice=90, Bob=85
+
+// Or maintain insertion order with LinkedHashMap
+Map<String, Integer> sortedMap = scores.entrySet().stream()
+    .sorted(Map.Entry.comparingByValue(Comparator.reverseOrder()))
+    .collect(Collectors.toMap(
+        Map.Entry::getKey,
+        Map.Entry::getValue,
+        (e1, e2) -> e1,
+        LinkedHashMap::new
+    ));
+```
+
+**Q: What's the difference between `HashMap.put()` and `HashMap.putIfAbsent()`?**
+```java
+map.put("key", "new");           // always overwrites, returns old value
+map.putIfAbsent("key", "new");   // only inserts if key absent, returns existing value
+// putIfAbsent is NOT atomic in HashMap — use ConcurrentHashMap for thread safety
+```
+
+---
+
+### Q20B: HashSet — How it Uses HashMap Internally
+
+#### Internal Structure — HashSet IS a HashMap
+
+```java
+// HashSet source code (simplified):
+public class HashSet<E> {
+    private transient HashMap<E, Object> map;
+    private static final Object PRESENT = new Object();  // dummy value
+
+    public boolean add(E e) {
+        return map.put(e, PRESENT) == null;  // PRESENT is the same object for all entries
+    }
+
+    public boolean contains(Object o) {
+        return map.containsKey(o);
+    }
+
+    public boolean remove(Object o) {
+        return map.remove(o) == PRESENT;
+    }
+    // Iteration: just iterates map.keySet()
+}
+```
+
+**Key insight:** HashSet stores elements as **keys** of a HashMap. The value is always a single shared dummy object `PRESENT`. This means HashSet has the same performance characteristics and memory overhead as HashMap.
+
+#### HashSet Interview Questions
+
+**Q: How does HashSet ensure no duplicates?**
+- Delegates to `HashMap.put(element, PRESENT)`.
+- `put` checks `equals()` on existing keys in the same bucket.
+- If `equals()` returns true, the key already exists → `put` returns old value (not null) → `add()` returns false.
+
+**Q: What are the time complexities?**
+- `add`, `remove`, `contains`: O(1) average, O(log n) worst case (same as HashMap)
+- Iteration: O(n + capacity)
+
+**Q: HashSet vs LinkedHashSet vs TreeSet?**
+
+| | HashSet | LinkedHashSet | TreeSet |
+|---|---|---|---|
+| Order | None | Insertion order | Sorted (natural or Comparator) |
+| `add/contains` | O(1) | O(1) | O(log n) |
+| Backed by | HashMap | LinkedHashMap | Red-Black Tree (TreeMap) |
+| Allows null | Yes (one) | Yes (one) | No (null can't be compared) |
+
+```java
+// TreeSet — sorted, range operations
+TreeSet<Integer> set = new TreeSet<>(Set.of(5, 2, 8, 1, 9));
+set.first();          // 1
+set.last();           // 9
+set.headSet(5);       // [1, 2]
+set.tailSet(5);       // [5, 8, 9]
+set.subSet(2, 8);     // [2, 5]
+set.floor(6);         // 5 (largest element ≤ 6)
+set.ceiling(6);       // 8 (smallest element ≥ 6)
+```
+
+**Q: Can you store mutable objects in a HashSet?**
+```java
+// DANGEROUS — mutating a key after insertion corrupts the Set
+class Point {
+    int x, y;
+    @Override public int hashCode() { return Objects.hash(x, y); }
+    @Override public boolean equals(Object o) { ... }
+}
+
+Set<Point> set = new HashSet<>();
+Point p = new Point(1, 2);
+set.add(p);
+set.contains(p);  // true
+
+p.x = 99;         // mutate → hashCode changes!
+set.contains(p);  // FALSE — p is now in the wrong bucket
+
+// Rule: only use immutable objects (String, Integer, records) as HashSet elements / HashMap keys
+```
+
+---
+
+### Q20C: ConcurrentHashMap — Internal Mechanics
+
+#### Java 7 vs Java 8 Architecture
+
+```
+JAVA 7 — Segment-based locking:
+  ConcurrentHashMap = 16 Segments (default concurrency level)
+  Each Segment = mini HashMap with its own ReentrantLock
+  Lock granularity: 1 segment = 1/16 of the map
+  put() locks the segment, get() is lock-free (volatile reads)
+
+JAVA 8 — Bucket-level locking (current):
+  ConcurrentHashMap = Node<K,V>[] table  (same as HashMap structure)
+  Locking: synchronized on the FIRST node of each bucket (not a Segment)
+  get(): completely lock-free (reads volatile fields)
+  put(): CAS for empty bucket, synchronized(firstNode) for non-empty
+  Concurrency: effectively one lock per bucket (thousands of locks vs 16)
+```
+
+#### How `put()` Works in Java 8 ConcurrentHashMap
+
+```java
+// Simplified ConcurrentHashMap.put() logic:
+
+// Case 1: table not initialized → CAS to init
+if (table == null) initTable();  // uses CAS to ensure only one thread initializes
+
+// Case 2: bucket is empty → CAS insert (no lock needed)
+if (bucket[index] == null) {
+    if (casTabAt(table, index, null, new Node(hash, key, value))) {
+        break;  // CAS succeeded → done, no lock held
+    }
+    // CAS failed → another thread inserted → retry loop
+}
+
+// Case 3: bucket is being resized (MOVED sentinel node)
+if (fh == MOVED) helpTransfer(table, node);  // participate in resize
+
+// Case 4: bucket has a node → lock the head node and traverse
+synchronized (firstNode) {
+    // traverse linked list or tree, insert/update
+    // only this bucket is locked — all other buckets remain accessible
+}
+```
+
+#### Why ConcurrentHashMap Doesn't Allow null
+
+```java
+ConcurrentHashMap<String, String> map = new ConcurrentHashMap<>();
+map.put(null, "value");   // NullPointerException
+map.put("key", null);     // NullPointerException
+
+// WHY? Ambiguity problem:
+// In a multi-threaded scenario:
+String val = map.get("key");
+if (val == null) {
+    // Is "key" absent? OR does "key" map to null?
+    // In HashMap: map.containsKey("key") tells you — but this is TWO operations
+    // In ConcurrentHashMap: between get() and containsKey(), another thread could change state
+    // So null is banned to eliminate ambiguity — absence is always unambiguous
+}
+```
+
+#### ConcurrentHashMap — All Interview Questions
+
+**Q: How does ConcurrentHashMap achieve thread safety without locking the entire map?**
+- Reads (`get`, `containsKey`): completely lock-free using `volatile` fields on nodes
+- Writes to empty bucket: lock-free using CAS (`compareAndSwapObject`)
+- Writes to non-empty bucket: fine-grained `synchronized` on the bucket's head node only
+- Result: different threads can read/write to different buckets simultaneously
+
+**Q: Is `size()` accurate in ConcurrentHashMap?**
+```java
+// NO — size() is approximate under concurrent modification
+// Uses a LongAdder-like mechanism: sum of base count + array of CounterCell values
+// Returns a snapshot; by the time you read it, the real size may have changed
+
+// For accurate count under concurrent use, don't rely on size()
+// Use ConcurrentHashMap as a concurrent set where membership matters, not count
+long count = map.mappingCount();  // returns long (Java 8+) — still approximate
+```
+
+**Q: What is the difference between `putIfAbsent()` and `computeIfAbsent()` in ConcurrentHashMap?**
+```java
+// putIfAbsent — always creates the value, only puts if key absent
+// Value creation happens OUTSIDE the atomic operation
+ConcurrentHashMap<String, List<String>> map = new ConcurrentHashMap<>();
+map.putIfAbsent("key", new ArrayList<>());  // creates ArrayList even if key exists!
+// Then the created ArrayList is thrown away if key already present — wasteful
+
+// computeIfAbsent — ATOMIC: only creates value if key is absent
+map.computeIfAbsent("key", k -> new ArrayList<>());  // value created only if needed
+// ALSO: holds the bucket lock during the entire compute — prevents duplicate creation
+// This makes computeIfAbsent the correct choice for expensive value construction
+```
+
+**Q: How do you atomically update a value in ConcurrentHashMap?**
+```java
+ConcurrentHashMap<String, Integer> counter = new ConcurrentHashMap<>();
+
+// WRONG — not atomic (get + put are two separate operations)
+counter.put("x", counter.getOrDefault("x", 0) + 1);
+
+// CORRECT options:
+counter.merge("x", 1, Integer::sum);          // atomic merge
+counter.compute("x", (k, v) -> v == null ? 1 : v + 1);  // atomic compute
+
+// For high-frequency counters, prefer LongAdder approach:
+ConcurrentHashMap<String, LongAdder> freq = new ConcurrentHashMap<>();
+freq.computeIfAbsent("word", k -> new LongAdder()).increment();
+// LongAdder uses internal striping → lower contention than AtomicInteger
+```
+
+**Q: ConcurrentHashMap vs Collections.synchronizedMap(HashMap)?**
+
+| | ConcurrentHashMap | synchronizedMap |
+|---|---|---|
+| Locking | Per-bucket (fine-grained) | Entire map (coarse) |
+| `get()` | Lock-free | Blocks all others |
+| Null keys/values | Not allowed | Allowed |
+| `size()` | Approximate | Exact (but requires lock) |
+| Iteration | Weakly consistent | Requires external sync for safe iteration |
+| Performance | High throughput | Low throughput under contention |
+
+```java
+// synchronizedMap — must manually sync for compound operations:
+Map<String, Integer> sync = Collections.synchronizedMap(new HashMap<>());
+synchronized(sync) {
+    if (!sync.containsKey("key")) sync.put("key", 1);  // check-then-act
+}
+
+// ConcurrentHashMap — compound ops are atomic, no external sync needed:
+ConcurrentHashMap<String, Integer> chm = new ConcurrentHashMap<>();
+chm.putIfAbsent("key", 1);   // atomic
+```
+
+**Q: What is a "weakly consistent" iterator in ConcurrentHashMap?**
+```java
+ConcurrentHashMap<String, Integer> map = new ConcurrentHashMap<>();
+map.put("a", 1); map.put("b", 2); map.put("c", 3);
+
+// Iterating ConcurrentHashMap never throws ConcurrentModificationException
+// But may or may not reflect modifications that happen AFTER the iterator was created:
+for (String key : map.keySet()) {
+    map.put("d", 4);      // safe — no exception
+    map.remove("a");      // safe — but iterator may or may not visit "a" after this
+}
+// "weakly consistent" = reflects some but not necessarily all concurrent changes
+```
+
+**Q: How does ConcurrentHashMap resize?**
+- It does a **concurrent transfer** — multiple threads can help move buckets simultaneously.
+- A `ForwardingNode` (with special hash `MOVED`) is placed in each bucket after it's transferred.
+- Other threads that attempt to write during resize detect `MOVED` and `helpTransfer()`.
+- This avoids the blocking rehash that HashMap does.
+
+**Q: When would you use ConcurrentHashMap over HashMap?**
+- Any time multiple threads read or write the same map concurrently.
+- Replacing a `HashMap` protected by a global lock — ConcurrentHashMap will perform better under contention.
+- Building caches, counters, session stores, feature flags in multi-threaded services.
+
+---
+
+### Q20D: WeakHashMap — When and Why
+
+#### How WeakHashMap Works
+
+```java
+// Regular HashMap:
+Map<Object, String> map = new HashMap<>();
+Object key = new Object();
+map.put(key, "value");
+key = null;   // key variable no longer points to the object
+// BUT the HashMap still holds a STRONG reference to the key object
+// The key object is NOT garbage collected — map holds it alive forever
+
+// WeakHashMap:
+Map<Object, String> wmap = new WeakHashMap<>();
+Object key = new Object();
+wmap.put(key, "value");
+key = null;   // only the wmap entry holds a reference now — but it's a WEAK reference
+System.gc();  // GC can collect the key object (and the entry disappears)
+wmap.size();  // may be 0 — entry was automatically removed!
+```
+
+#### Internal Mechanism
+
+```java
+// WeakHashMap stores keys wrapped in WeakReference:
+// WeakReference<K> weakKey = new WeakReference<>(key, referenceQueue);
+
+// When GC collects the key:
+//   1. GC clears the WeakReference (weakKey.get() returns null)
+//   2. The WeakReference is enqueued in the ReferenceQueue
+//   3. On next WeakHashMap operation (put/get/size), it polls the queue
+//   4. Stale entries with collected keys are removed from the table
+
+// This cleanup is LAZY — it happens on the next operation, not immediately on GC
+```
+
+#### Use Cases and Anti-Patterns
+
+```java
+// USE CASE 1: Canonical mapping / caching where key is the owner
+// Classic example: per-object metadata (without modifying the object)
+WeakHashMap<Widget, ButtonListener> listeners = new WeakHashMap<>();
+listeners.put(widget, new ButtonListener(widget));
+// When widget is GC'd (no other references), listener entry auto-removed
+// Without WeakHashMap, listeners map would keep widget alive forever → memory leak
+
+// USE CASE 2: Object identity caches
+static final WeakHashMap<BigInteger, WeakReference<BigInteger[]>> cache = new WeakHashMap<>();
+
+// USE CASE 3: Replacing equals-based comparison with identity-based cache
+// (WeakHashMap uses identity equality == for keys when keys don't override equals/hashCode)
+
+// COMMON ANTI-PATTERN: using String literals as keys
+WeakHashMap<String, Object> bad = new WeakHashMap<>();
+bad.put("constant", new Object());
+// String literals are interned — they NEVER get GC'd (strong reference in string pool)
+// This entry will NEVER be evicted → WeakHashMap provides zero benefit
+
+// ANTI-PATTERN: WeakHashMap as thread-safe cache
+// WeakHashMap is NOT thread-safe. Use Collections.synchronizedMap() or dedicated cache libs
+Map<Key, Value> safe = Collections.synchronizedMap(new WeakHashMap<>());
+// For production: use Caffeine with weakKeys()
+Cache<Key, Value> cache = Caffeine.newBuilder().weakKeys().build();
+```
+
+#### WeakHashMap Interview Questions
+
+**Q: When should you use WeakHashMap over HashMap?**
+- When the map should not prevent its keys from being garbage collected.
+- When the map's entries are only meaningful as long as the key object is alive elsewhere.
+- Typical: per-object metadata, association tables, non-intrusive caches.
+- Atypical: if you need a general-purpose cache, use Caffeine/Guava which give you LRU + TTL + WeakKeys together.
+
+**Q: WeakHashMap vs SoftReference-based cache?**
+```java
+// WeakHashMap keys: collected at next GC (aggressive)
+// SoftReference values: collected only when memory pressure is high (gentle)
+
+// For a memory-sensitive cache, combine:
+// - WeakHashMap for automatic key cleanup
+// - SoftReference for values to keep them as long as memory allows
+Map<Key, SoftReference<Value>> cache = new WeakHashMap<>();
+Value v = Optional.ofNullable(cache.get(key))
+    .map(SoftReference::get)
+    .orElseGet(() -> {
+        Value loaded = load(key);
+        cache.put(key, new SoftReference<>(loaded));
+        return loaded;
+    });
+```
+
+**Q: Is WeakHashMap thread-safe?**
+- No. It has the same thread-safety issues as HashMap.
+- Additionally, GC can modify the map at any time (by clearing entries) — making it even more dangerous to iterate without synchronization.
+
+**Q: What is the relationship between WeakHashMap and memory leaks?**
+- WeakHashMap is a cure for the "listener/cache memory leak" pattern.
+- Without it: `static Map<Widget, Data>` holds Widget alive forever even after the widget is gone from the UI.
+- With WeakHashMap: when the Widget loses its last strong reference elsewhere, the map entry is automatically removed.
+
+---
+
+#### Quick Comparison — All Map Types
+
+| | HashMap | LinkedHashMap | TreeMap | ConcurrentHashMap | WeakHashMap | Hashtable |
+|---|---|---|---|---|---|---|
+| Order | None | Insertion/Access | Sorted | None | None | None |
+| Null key | Yes (1) | Yes (1) | No | No | Yes | No |
+| Null values | Yes | Yes | Yes | No | Yes | No |
+| Thread-safe | No | No | No | Yes | No | Yes (legacy) |
+| Performance | O(1) | O(1) | O(log n) | O(1) | O(1) | O(1) synchronized |
+| Backed by | Array+LL/Tree | Array+LL | Red-Black Tree | Array+LL/Tree | WeakRef array | Array+LL |
+| Use case | General | LRU cache, ordered | Range queries | Concurrent access | Auto-evicting cache | Legacy only |
 
 ---
 
