@@ -683,34 +683,256 @@ prices.subMap(LocalDate.now().minusDays(7), true, LocalDate.now(), true);
 
 ---
 
-### Q18: ConcurrentHashMap vs synchronized HashMap.
+### Q18: ConcurrentHashMap vs synchronized HashMap — Complete Deep Dive
+
+---
+
+#### The Problem With synchronized HashMap
+
+Imagine a busy server where 100 threads are reading/writing a shared map at the same time.
 
 ```java
-// DON'T: synchronized entire map on every operation
-Map<String, Integer> m = Collections.synchronizedMap(new HashMap<>());
-synchronized(m) { /* must lock externally for compound ops like check-then-act */ }
+// Option 1: plain HashMap — NOT thread-safe
+Map<String, Integer> map = new HashMap<>();
+// Two threads putting simultaneously can corrupt internal state:
+// - Both resize at the same time → circular linked list → infinite loop (Java 7)
+// - Lost updates, wrong values (Java 8+)
 
-// DO: ConcurrentHashMap — fine-grained locking
-ConcurrentHashMap<String, Integer> m = new ConcurrentHashMap<>();
-
-// Atomic compound operations (no external sync needed)
-m.putIfAbsent("counter", 0);
-m.computeIfAbsent("key", k -> expensiveLoad(k));
-m.merge("counter", 1, Integer::sum);  // thread-safe increment
+// Option 2: Collections.synchronizedMap — safe but slow
+Map<String, Integer> map = Collections.synchronizedMap(new HashMap<>());
 ```
 
-**Under the hood (Java 8+):**
-- No more segment locking (Java 7 had 16 segments)
-- Uses CAS operations + `synchronized` on individual bucket heads
-- Full concurrent reads (no locking)
-- Write contention only at same bucket
-- `size()` is approximate (uses `LongAdder` internals)
-
-*Production pattern — concurrent frequency count:*
+**How `synchronizedMap` works internally:**
 ```java
-ConcurrentHashMap<String, Long> freq = new ConcurrentHashMap<>();
-words.parallelStream().forEach(w -> freq.merge(w, 1L, Long::sum));
+// Every single method is wrapped with synchronized(mutex):
+public V get(Object key) {
+    synchronized(mutex) { return map.get(key); }
+}
+public V put(K key, V value) {
+    synchronized(mutex) { return map.put(key, value); }
+}
+// mutex = the map itself (by default)
 ```
+
+**The problem:**
+
+```
+Thread-1  get("A") ──► LOCKS entire map ──► reads ──► UNLOCKS
+Thread-2  get("B") ──►                      WAITS until T1 done
+Thread-3  put("C") ──►                      WAITS until T2 done
+Thread-4  get("D") ──►                      WAITS until T3 done
+...
+```
+
+Even 100 threads doing **reads only** are blocked one at a time. A read should never block another read — there's no state change. But `synchronizedMap` doesn't know the difference.
+
+---
+
+#### ConcurrentHashMap — The Solution
+
+The core idea: **different parts of the map can be accessed simultaneously**.
+
+---
+
+#### Java 7: Segment-Based Locking
+
+```
+ConcurrentHashMap (Java 7)
+═══════════════════════════════
+
+Segment[0]  Segment[1]  Segment[2]  ...  Segment[15]
+   🔒           🔒           🔒                🔒
+[bucket]    [bucket]    [bucket]         [bucket]
+[bucket]    [bucket]    [bucket]         [bucket]
+[bucket]    [bucket]    [bucket]         [bucket]
+
+Default: 16 segments → 16 independent locks
+```
+
+- Map is divided into 16 **Segments** (default concurrencyLevel=16).
+- Each Segment is essentially a mini `HashMap` with its own `ReentrantLock`.
+- `put("A", ...)` → locks only the segment that "A" hashes into.
+- `put("B", ...)` → if "B" hashes into a different segment → runs **simultaneously**.
+- **16× better throughput** than synchronizedMap under high concurrency.
+- `get()` was mostly lock-free (volatile reads).
+
+**Limitation of Java 7:** Still 16 locks. If all writes happen to hash into the same segment, you're back to serial writes.
+
+---
+
+#### Java 8: Bucket-Level Locking (Current Implementation)
+
+Java 8 completely rewrote ConcurrentHashMap. No more Segments. The locking granularity is now **one lock per bucket** — potentially thousands of locks.
+
+```
+ConcurrentHashMap (Java 8)
+═══════════════════════════════════════════════════════
+
+Node[] table  (default 16 buckets, grows as needed)
+
+ [0]   [1]   [2]   [3]   [4]   [5]   [6]   [7] ...
+  │     │     │     │     │
+  A     B     C     ∅     D→E→F  ← collision chain
+  ↓
+  G                        ↓
+  ↓               (this bucket is treeified
+  ∅               when chain length > 8)
+
+Thread-1 writes to bucket[2] → locks bucket[2] head node only
+Thread-2 writes to bucket[5] → locks bucket[5] head node only
+Thread-3 reads  from bucket[0] → NO LOCK at all (volatile read)
+All three run simultaneously ✓
+```
+
+---
+
+#### The Three Locking Strategies in Java 8
+
+**Case 1: Bucket is empty → CAS (no lock at all)**
+
+```java
+// CAS = Compare And Swap — a single CPU instruction
+// "If the current value at this memory address is X, set it to Y atomically"
+
+if (bucket[index] == null) {
+    // Try to insert with CAS — no synchronized block needed
+    if (casTabAt(table, index, null, newNode)) {
+        break;  // CAS succeeded — done!
+    }
+    // If CAS failed, another thread inserted between our check and swap → retry
+}
+```
+
+```
+Thread-1: bucket[3] == null? YES → CAS(bucket[3], null, NodeA) → SUCCESS → done
+Thread-2: bucket[7] == null? YES → CAS(bucket[7], null, NodeB) → SUCCESS → done
+Both complete without ANY lock acquisition.
+```
+
+**Case 2: Bucket has nodes → synchronized on the head node**
+
+```java
+synchronized (firstNodeInBucket) {
+    // traverse linked list or tree
+    // find key, update value OR append new node
+}
+// Only threads touching THIS SPECIFIC BUCKET are serialized.
+// All other 15 (or 15,000) buckets remain fully accessible.
+```
+
+**Case 3: Read (get) → completely lock-free**
+
+```java
+// Node fields are volatile:
+volatile V val;
+volatile Node<K,V> next;
+
+// get() just reads volatile fields — no synchronization needed
+// Java memory model guarantees: volatile write happens-before volatile read
+// So any thread that wrote a value, and then another thread reads it → sees the latest value
+public V get(Object key) {
+    int h = spread(key.hashCode());
+    Node<K,V> e = tabAt(table, (table.length - 1) & h);  // volatile read
+    while (e != null) {
+        if (e.hash == h && key.equals(e.key)) return e.val;  // volatile read
+        e = e.next;  // volatile read
+    }
+    return null;
+}
+// Zero locks. Any number of threads can read simultaneously.
+```
+
+---
+
+#### Visual: What Happens Under Concurrent Load
+
+```
+10 threads: T1-T5 doing get(), T6-T10 doing put() on different keys
+
+T1  get("apple")  ──► reads bucket[2]  ──► no lock  ──► DONE instantly
+T2  get("banana") ──► reads bucket[7]  ──► no lock  ──► DONE instantly
+T3  get("cherry") ──► reads bucket[11] ──► no lock  ──► DONE instantly
+T4  get("date")   ──► reads bucket[4]  ──► no lock  ──► DONE instantly
+T5  get("elderb") ──► reads bucket[2]  ──► no lock  ──► DONE instantly
+
+T6  put("fig",1)  ──► bucket[9] empty  ──► CAS       ──► DONE (no lock)
+T7  put("grape",1)──► bucket[3] empty  ──► CAS       ──► DONE (no lock)
+T8  put("kiwi",1) ──► bucket[9] exists ──► lock[9]   ──► DONE
+T9  put("lime",1) ──► bucket[3] exists ──► lock[3]   ──► DONE
+T10 put("mango",1)──► bucket[9] exists ──► WAITS for T8 to release lock[9]
+
+All 10 threads run concurrently except T10 waits briefly for T8.
+In synchronizedMap: all 10 would be fully serialized.
+```
+
+---
+
+#### How size() Works — The LongAdder Trick
+
+```java
+// Can't use a single int counter — incrementing it would need global locking
+
+// ConcurrentHashMap uses a LongAdder-like approach:
+// baseCount (volatile long) + CounterCell[] (array of longs, one per CPU core)
+
+// On increment:
+// 1. Try to CAS baseCount. If CAS succeeds, done.
+// 2. If CAS fails (contention), hash this thread to a CounterCell and increment it.
+
+// On size():
+// sum = baseCount + sum(all CounterCells)
+
+// WHY: under high contention, 100 threads incrementing ONE counter = 99 retries per op
+// With 8 CounterCells: ~12 threads per cell → much less contention
+// Trade-off: size() is approximate (counts are spread across cells, no atomic snapshot)
+```
+
+---
+
+#### Concurrent Resize — Cooperative Transfer
+
+```
+Normal HashMap resize: one thread does ALL the work (stops the world for that thread)
+
+ConcurrentHashMap resize: ALL threads help!
+
+When resize is triggered:
+1. New table (double size) is created
+2. A "transfer index" tracks which buckets still need to be moved
+3. The resizing thread picks up a chunk of buckets to transfer
+4. Other threads that try to write during resize detect a ForwardingNode sentinel
+   (a special node with hash = MOVED = -1)
+5. Those threads call helpTransfer() — they pick up their own chunk of buckets to move
+6. Once all buckets are moved, the table reference is swapped atomically
+
+Result: resize is parallel, no thread is fully blocked
+A ForwardingNode in a bucket means: "this bucket is done, look in the new table"
+```
+
+---
+
+#### ConcurrentHashMap vs synchronizedMap — Side by Side
+
+```
+OPERATION          synchronizedMap          ConcurrentHashMap
+──────────────────────────────────────────────────────────────
+get()              LOCKS entire map         Lock-free (volatile reads)
+put() empty bucket LOCKS entire map         CAS (no lock)
+put() non-empty    LOCKS entire map         Locks ONE bucket only
+Iteration          Must sync externally     Weakly consistent, no lock
+size()             Exact (locked)           Approximate (LongAdder)
+null keys/values   Allowed                  NOT allowed
+Null semantics     get(k)==null ambiguous   Always means "key absent"
+Throughput (reads) Serialized               Fully parallel
+Throughput (writes) Serialized             Parallel across buckets
+Compound ops       Need external sync       putIfAbsent/compute/merge
+```
+
+---
+
+#### Interview Answer — The 60-Second Version
+
+*"The core difference is lock granularity. `synchronizedMap` wraps every operation in a single lock on the entire map — so all threads are serialized, even concurrent reads. `ConcurrentHashMap` uses three strategies: reads are completely lock-free using volatile fields, writes to empty buckets use CAS (a single CPU instruction, no lock), and writes to non-empty buckets lock only the head of that specific bucket. So if you have 100 buckets, 100 threads can write simultaneously with zero contention. In Java 7 this was done with 16 Segments; Java 8 eliminated Segments entirely and made it per-bucket. The trade-off is that `size()` is approximate, and null keys/values are banned because in a concurrent environment you can't distinguish 'key is absent' from 'key maps to null' without a compound check-then-get."*
 
 ---
 
