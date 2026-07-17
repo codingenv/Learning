@@ -936,6 +936,220 @@ Compound ops       Need external sync       putIfAbsent/compute/merge
 
 ---
 
+#### Why Reads Are Not Blocked — And the Role of `volatile`
+
+This is the most misunderstood part of ConcurrentHashMap. The question is exactly right: **if reads are not locked, can you read a stale value?** The answer lies in understanding what `volatile` actually does at the CPU level.
+
+---
+
+##### Step 1 — The Problem Without volatile
+
+First, understand why reading without locks CAN go wrong in a regular HashMap:
+
+```
+CPU Architecture (simplified):
+
+Core 1 (Thread-1 — writer)     Core 2 (Thread-2 — reader)
+┌─────────────────────┐         ┌─────────────────────┐
+│  L1 Cache           │         │  L1 Cache           │
+│  node.val = "Alice" │         │  node.val = "Bob"   │  ← STALE!
+└────────┬────────────┘         └────────┬────────────┘
+         │                               │
+         └──────────┬────────────────────┘
+                    │
+              Main Memory
+              node.val = "Alice"  (written by T1)
+```
+
+**What happens without volatile:**
+- Thread-1 writes `node.val = "Alice"` to its L1 cache.
+- Thread-1's L1 cache may NOT flush to main memory immediately.
+- Thread-2 reads `node.val` from ITS own L1 cache — still sees `"Bob"`.
+- Thread-2 gets a **stale value** — not because of a race condition, but because of CPU cache visibility.
+
+This is the **CPU cache coherence problem**. Modern CPUs have L1/L2/L3 caches per core, and writes are not instantly visible to other cores.
+
+---
+
+##### Step 2 — What `volatile` Actually Does
+
+```java
+// In ConcurrentHashMap's Node class:
+static class Node<K,V> {
+    final int hash;
+    final K key;
+    volatile V val;        // ← volatile
+    volatile Node<K,V> next; // ← volatile
+}
+```
+
+`volatile` has two guarantees baked into the Java Memory Model (JMM):
+
+**Guarantee 1 — Visibility (cache flush)**
+
+```
+Thread-1 writes: node.val = "Alice"  (volatile write)
+  → CPU is FORCED to flush this write from L1 cache to main memory IMMEDIATELY
+  → All other CPU cores' caches that held the old value are INVALIDATED
+
+Thread-2 reads: node.val              (volatile read)
+  → CPU is FORCED to fetch from main memory (or L3 shared cache), NOT from its own L1
+  → Always sees the most recently written value
+
+GUARANTEE: Thread-2 will NEVER see a stale value after a volatile write has completed.
+```
+
+**Guarantee 2 — Happens-Before (no reordering)**
+
+```
+Thread-1:
+  node.key = "user1"          // regular write
+  node.val = "Alice"          // volatile write ← FENCE
+
+Happens-before guarantee:
+  Everything Thread-1 wrote BEFORE the volatile write (including node.key)
+  is guaranteed to be visible to any thread that reads the volatile field.
+
+Thread-2:
+  V val = node.val             // volatile read ← FENCE
+  // Thread-2 is now guaranteed to also see node.key = "user1"
+  // because node.key was written before the volatile write in Thread-1
+```
+
+The volatile write acts as a **memory fence** (also called a memory barrier) — a CPU instruction that:
+- Drains the write buffer to main memory before proceeding
+- Prevents the compiler and CPU from reordering instructions across the fence
+
+---
+
+##### Step 3 — How ConcurrentHashMap Uses This
+
+```java
+// Reading a value in ConcurrentHashMap.get():
+public V get(Object key) {
+    Node<K,V>[] tab;
+    Node<K,V> e, p;
+    int n, eh;
+    K ek;
+
+    int h = spread(key.hashCode());
+
+    // tabAt() does a volatile read of table[index]
+    if ((tab = table) != null && (n = tab.length) > 0 &&
+        (e = tabAt(tab, (n - 1) & h)) != null) {
+
+        if ((eh = e.hash) == h) {
+            if ((ek = e.key) == key || (ek != null && key.equals(ek)))
+                return e.val;  // volatile read of val
+        }
+        // ... traverse chain
+    }
+    return null;
+}
+
+// tabAt() internally uses Unsafe.getObjectVolatile() — a volatile array element read
+// This ensures we always see the latest bucket head, not a cached version
+```
+
+Every single read in `get()` goes through volatile:
+- Reading the bucket head from the table → volatile
+- Reading `node.val` → volatile
+- Reading `node.next` to traverse → volatile
+
+This means no lock is needed. The volatile keyword itself **provides the memory visibility guarantee** that a lock would otherwise provide.
+
+---
+
+##### Step 4 — But Can You Still Read a "Stale" Value?
+
+**Short answer: Yes, intentionally, and it's by design.**
+
+Here's the key distinction:
+
+```
+SCENARIO:
+  T1 (writer): puts("A", "Alice")  ← in progress
+  T2 (reader): gets("A")           ← runs at the same time
+
+Two possible outcomes for T2:
+  1. T2 reads BEFORE T1's volatile write completes → gets null (key not yet inserted)
+  2. T2 reads AFTER T1's volatile write completes  → gets "Alice"
+
+BOTH outcomes are correct and consistent.
+ConcurrentHashMap guarantees: you will NEVER see a partially constructed node.
+You either see the node fully (with its key and val) or you don't see it at all.
+```
+
+**What volatile prevents (the real danger):**
+```java
+// WITHOUT volatile, this could happen (broken HashMap):
+// Thread-1 is writing: node.key = "A", node.val = "Alice"
+// Due to CPU reordering, Thread-1 might publish node.next (making node visible)
+// BEFORE finishing writing node.key and node.val
+
+// Thread-2 sees the node (because next pointer is published)
+// but reads node.key = null, node.val = null  ← PARTIALLY CONSTRUCTED OBJECT
+
+// This is the "unsafe publication" problem.
+// volatile on val and next PREVENTS this reordering.
+// If Thread-2 can read node.val (volatile read), it is guaranteed
+// that node.key was also fully written before that point.
+```
+
+---
+
+##### Step 5 — The Full Mental Model
+
+```
+WRITE path (put):
+  1. Compute hash, find bucket
+  2. If empty:  CAS(bucket, null, newNode)
+     → The CAS itself is a memory fence → newNode is fully visible after this
+  3. If non-empty: synchronized(bucketHead) {
+       write node fields (regular writes)
+       link node into chain (write to node.next — volatile)
+     }
+     → Releasing the synchronized lock flushes all writes to main memory
+
+READ path (get):
+  1. volatile read of bucket head from table
+  2. volatile read of node.val
+  3. volatile read of node.next (for traversal)
+  → Each volatile read sees the latest value that any writer has flushed
+
+GUARANTEE: A reader will NEVER see a half-written node.
+TRADE-OFF: A reader MAY see data from "just before" a concurrent write completes.
+           This is called "linearizable" — each operation appears to happen at a single point in time.
+```
+
+---
+
+##### Why This Is Better Than Locking for Reads
+
+```
+With a lock:
+  Reader acquires lock → reads → releases lock
+  During read: ALL writers are blocked even if they're writing to different buckets
+  Cost: lock acquisition + context switch if lock is contended
+
+With volatile:
+  Reader executes a special CPU instruction (MFENCE or equivalent)
+  This forces a cache-line refresh — takes ~10-50 nanoseconds
+  No thread suspension, no kernel involvement, no context switch
+
+In a read-heavy system (90% reads, 10% writes):
+  Lock-based:    readers serialize, throughput = 1× (one reader at a time)
+  Volatile-based: readers run in parallel, throughput = N× (N threads reading simultaneously)
+```
+
+---
+
+##### Summary — What to Say in the Interview
+
+*"Reads in ConcurrentHashMap are lock-free because Node's `val` and `next` fields are declared `volatile`. Volatile has two effects: first, it forces every write to flush immediately from CPU cache to main memory, and every read to fetch from main memory rather than a stale CPU cache. Second, it acts as a memory fence that prevents CPU and compiler reordering — so if you can read a node's volatile `val` field, you're guaranteed that all the fields written before that volatile write (like `key` and `hash`) are also visible. This means you can never see a half-constructed node. Yes, you could read a value from 'just before' a concurrent write — but you either see the fully committed old value or the fully committed new value. You never see an inconsistent in-between state. That's the guarantee volatile provides, and it's why no lock is needed for reads."*
+
+---
+
 ### Q19: Comparable vs Comparator.
 
 ```java
