@@ -2274,28 +2274,32 @@ RejectedExecutionHandler handler = (task, executor) -> {
 This is the exact logic inside `ThreadPoolExecutor.execute()`:
 
 ```
-Task submitted via execute() or submit()
-        |
-        v
-+---------------------------------------------+
-| Running threads < corePoolSize?             |
-| YES --> Create new thread, run task         |  <- even if idle threads exist
-+------------------------+--------------------+
-                         | NO
-                         v
-+---------------------------------------------+
-| Can task be added to workQueue?             |
-| YES --> Queue it, wait for a thread to pick |  <- threads NOT created here
-+------------------------+--------------------+
-                         | NO (queue full)
-                         v
-+---------------------------------------------+
-| Running threads < maximumPoolSize?          |
-| YES --> Create new (non-core) thread        |
-+------------------------+--------------------+
-                         | NO (at max AND queue full)
-                         v
-                 RejectedExecutionHandler
+               New Task
+                  │
+                  ▼
+  Current Threads < corePoolSize?
+          │
+         Yes ──────────────────────► Create Core Thread → Run Task
+          │
+         No
+          │
+          ▼
+      Queue Full?
+          │
+         No ───────────────────────► Put Task in Queue → Wait for Thread
+          │
+         Yes
+          │
+          ▼
+  Current Threads < maximumPoolSize?
+          │
+         Yes ──────────────────────► Create Extra (non-core) Thread → Run Task
+          │
+         No
+          │
+          ▼
+      Reject Task
+    (RejectedExecutionHandler)
 ```
 
 **The counterintuitive implication:**
