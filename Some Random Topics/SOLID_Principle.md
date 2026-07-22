@@ -273,7 +273,7 @@ var calc = new ShippingCost(map);
 
 ---
 
-## L — Liskov Substitution Principle (LSP)
+## L — Liskov Substitution Principle (LSP)(https://medium.com/@cibofdevs/understanding-the-substitution-principle-in-java-185df0e0fc2a)
 
 ### Definition
 If **S is a subtype of T**, then objects of type T should be replaceable with objects of type S **without breaking correctness**.

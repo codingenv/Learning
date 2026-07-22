@@ -9,19 +9,30 @@
 
 **Part 1: Core Java Fundamentals**
 1. [Object-Oriented Programming Concepts](#1-object-oriented-programming-concepts)
-2. [Java Memory Management and Garbage Collection](#2-java-memory-management-and-garbage-collection)
-3. [Collections Framework](#3-collections-framework)
+2. [Strings in Java](#2-strings-in-java)
+   - [Q-S1: How is String stored in Java? String Pool vs Heap](#q-s1-how-is-string-stored-in-java-string-pool-vs-heap)
+   - [Q-S2: Why is String immutable? What are the benefits?](#q-s2-why-is-string-immutable-what-are-the-benefits)
+   - [Q-S3: == vs .equals() for Strings — what's the difference?](#q-s3--vs-equals-for-strings--whats-the-difference)
+   - [Q-S4: String, StringBuilder, StringBuffer — when to use which?](#q-s4-string-stringbuilder-stringbuffer--when-to-use-which)
+   - [Q-S5: How does String interning work? When should you use intern()?](#q-s5-how-does-string-interning-work-when-should-you-use-intern)
+   - [Q-S6: String memory leaks — substring() trap in Java 6](#q-s6-string-memory-leaks--substring-trap-in-java-6)
+   - [Q-S7: How does String concatenation work at the bytecode level?](#q-s7-how-does-string-concatenation-work-at-the-bytecode-level)
+   - [Q-S8: Char array vs String for storing passwords — why?](#q-s8-char-array-vs-string-for-storing-passwords--why)
+   - [Q-S9: How are Strings implemented internally? (byte[] in Java 9+)](#q-s9-how-are-strings-implemented-internally-byte-in-java-9)
+   - [Q-S10: Text Blocks, String methods from Java 11-21](#q-s10-text-blocks-string-methods-from-java-11-21)
+3. [Java Memory Management and Garbage Collection](#3-java-memory-management-and-garbage-collection)
+4. [Collections Framework](#4-collections-framework)
    - [Q16: HashMap internals — load factor, hash collisions](#q16-hashmap-internals--load-factor-hash-collisions)
    - [Q16 Extended: HashMap Internals — Complete Deep Dive](#q16-extended-hashmap-internals--complete-deep-dive)
    - [Q20A: HashMap — Complete Interview Deep Dive (16+ years level)](#q20a-hashmap--complete-interview-deep-dive)
    - [Q20B: HashSet — How it uses HashMap internally](#q20b-hashset--how-it-uses-hashmap-internally)
    - [Q20C: ConcurrentHashMap — Internal mechanics and all interview questions](#q20c-concurrenthashmap--internal-mechanics)
    - [Q20D: WeakHashMap — When and why to use it](#q20d-weakhashmap--when-and-why)
-4. [Multithreading and Concurrency](#4-multithreading-and-concurrency)
-5. [Exception Handling](#5-exception-handling)
-6. [Generics](#6-generics)
-7. [Functional Programming and Lambdas](#7-functional-programming-and-lambdas)
-8. [Java 9+ Language Features](#8-java-9-language-features)
+5. [Multithreading and Concurrency](#5-multithreading-and-concurrency)
+6. [Exception Handling](#6-exception-handling)
+7. [Generics](#7-generics)
+8. [Functional Programming and Lambdas](#8-functional-programming-and-lambdas)
+9. [Java 9+ Language Features](#9-java-9-language-features)
 
 **Part 2: Advanced Java Concepts**
 9. [Spring Framework and Dependency Injection](#9-spring-framework-and-dependency-injection)
@@ -332,7 +343,604 @@ class LoggingEmailService implements EmailService {
 
 ---
 
-## 2. Java Memory Management and Garbage Collection
+## 2. Strings in Java
+
+> *String is the most used class in Java. It has more nuance — memory layout, pool mechanics, encoding changes, concat optimisation — than most engineers realise. Expect 3–5 String questions in any senior interview.*
+
+---
+
+### Q-S1: How is String stored in Java? String Pool vs Heap
+
+**Short answer:** String literals are stored in the **String Pool** (a section of the Heap since Java 7); `new String(...)` always creates an object on the regular Heap.
+
+#### Memory layout
+
+```
+HEAP
+├── String Pool  (a HashTable-like structure managed by the JVM)
+│   ├── "hello"  ← shared object, all literals "hello" point here
+│   └── "world"
+└── Regular Heap
+    └── new String("hello")  ← separate object, even if "hello" already in pool
+```
+
+#### Where exactly is the pool?
+
+| Java version | String Pool location |
+|---|---|
+| Java ≤ 6 | **PermGen** — fixed size (default 64 MB), could cause `OutOfMemoryError: PermGen space` |
+| Java 7+ | **Heap** — same GC-managed space as other objects; pool can grow; strings can be GC'd when no strong reference exists |
+| Java 8+ | PermGen removed; replaced by **Metaspace** (class metadata), but pool stays on the Heap |
+
+Moving the pool to the Heap in Java 7 was a deliberate fix: intern'd strings could now be garbage-collected, eliminating a whole class of memory leaks.
+
+#### How the pool works internally
+
+The JVM maintains a **hash table** (native C++ `StringTable`) mapping hash codes → weak references to `String` objects. When you write:
+
+```java
+String a = "hello";
+String b = "hello";
+```
+
+1. Class loading triggers the constant pool resolution.
+2. JVM checks `StringTable` for `"hello"`.
+3. Not found → allocates `String("hello")` on heap, registers a weak reference in `StringTable`.
+4. `b = "hello"` → found in `StringTable` → returns same reference.
+5. `a == b` → `true` (same object).
+
+```java
+String a = "hello";
+String b = "hello";
+String c = new String("hello");  // bypasses pool lookup
+
+System.out.println(a == b);      // true  — same pool object
+System.out.println(a == c);      // false — c is on regular heap
+System.out.println(a.equals(c)); // true  — same content
+System.out.println(c.intern() == a); // true — intern() puts c into pool (or returns existing)
+```
+
+#### JVM flags for the pool
+
+```bash
+# Size the pool (number of buckets in the StringTable hash map)
+-XX:StringTableSize=65536   # default since Java 11; increase for string-heavy apps
+
+# Print pool stats on JVM exit
+-XX:+PrintStringTableStatistics
+```
+
+#### Runtime string constants
+
+String **literals** (`"hello"`) and **compile-time constant expressions** (`"hel" + "lo"`) go to the pool at class-load time. **Runtime-computed** strings (`"hel" + variable`) go to the heap.
+
+```java
+String x = "hel" + "lo";   // compile-time constant → pool → "hello"
+String y = "hel";
+String z = y + "lo";        // runtime concat → new heap object
+System.out.println(x == "hello"); // true
+System.out.println(z == "hello"); // false
+```
+
+---
+
+### Q-S2: Why is String immutable? What are the benefits?
+
+`String` is immutable because:
+1. The internal `byte[]` (or `char[]` before Java 9) is declared `private final`.
+2. No method on `String` ever modifies it — all "modification" methods return a new `String`.
+3. The class itself is declared `final` — you cannot subclass it and override methods to mutate state.
+
+```java
+// Simplified internal structure (Java 9+)
+public final class String {
+    private final byte[] value;       // content, never changed after construction
+    private final byte coder;         // LATIN1 (0) or UTF16 (1)
+    private int hash;                 // cached hash; lazily set, but safely published
+    // ...
+}
+```
+
+#### Why immutability was a deliberate design choice
+
+**1. String Pool works ONLY because strings are immutable**
+
+If `String` were mutable, sharing pool entries would be catastrophic:
+
+```java
+String a = "hello";
+String b = "hello";  // points to same object
+a.setCharAt(0, 'H'); // hypothetical mutating method
+// now b == "Hello" too — silent data corruption
+```
+
+Immutability makes sharing safe.
+
+**2. Thread safety for free**
+
+Immutable objects are inherently thread-safe. A `String` can be passed between threads with no synchronization. In a web server handling thousands of concurrent requests, every URL, header name, and session key is a `String` — no locking needed.
+
+**3. Safe as HashMap/HashSet key**
+
+`HashMap` computes `hashCode()` once and caches it in the `hash` field. If strings were mutable, you could:
+```java
+Map<String, User> map = new HashMap<>();
+String key = "user123";
+map.put(key, user);
+key.setCharAt(0, 'X');  // hypothetical
+map.get("user123");      // lost — hash changed, key moved to wrong bucket
+```
+Immutability ensures the hash never changes, so map lookups always work.
+
+**4. Security**
+
+Sensitive values like file paths, class names, and network hosts are passed as strings. If mutable, an attacker-controlled object could modify the path between security check and actual use (TOCTOU vulnerability).
+
+```java
+// JVM class loading — class name is verified, then loaded
+// If String were mutable, name could be changed between verify and load
+ClassLoader.loadClass(untrustedName);  // safe only because String is immutable
+```
+
+**5. Optimisation: cached hashCode**
+
+```java
+public int hashCode() {
+    int h = hash;
+    if (h == 0 && !hashIsZero) {
+        h = computeHash();
+        hash = h;         // safe to write without sync — immutable object
+        if (h == 0) hashIsZero = true;
+    }
+    return h;
+}
+```
+The `hash` field is computed once and cached. HashMap performance depends on fast, stable `hashCode()`.
+
+---
+
+### Q-S3: == vs .equals() for Strings — what's the difference?
+
+`==` compares **object references** (memory addresses). `.equals()` compares **content** (character by character).
+
+```java
+String a = "hello";
+String b = "hello";
+String c = new String("hello");
+String d = new String("hello");
+
+System.out.println(a == b);        // true  — same pool object
+System.out.println(a == c);        // false — c is on heap, a is in pool
+System.out.println(c == d);        // false — two separate heap objects
+System.out.println(a.equals(c));   // true  — same content
+System.out.println(c.equals(d));   // true  — same content
+```
+
+#### How String.equals() works internally
+
+```java
+public boolean equals(Object anObject) {
+    if (this == anObject) return true;         // reference check first (fast path)
+    return (anObject instanceof String aString)
+        && (!COMPACT_STRINGS || this.coder == aString.coder)
+        && StringLatin1.equals(value, aString.value);  // byte-by-byte comparison
+}
+```
+
+The reference check (`this == anObject`) short-circuits immediately for pool strings.
+
+#### equalsIgnoreCase vs toUpperCase().equals()
+
+```java
+// Correct — no intermediate object
+"HELLO".equalsIgnoreCase("hello");  // true
+
+// Wasteful — creates a new String just for comparison
+"hello".toUpperCase().equals("HELLO");  // true but allocates
+```
+
+#### NullPointerException trap
+
+```java
+String s = null;
+s.equals("hello");      // NullPointerException
+"hello".equals(s);      // false — safe idiom (Yoda condition)
+Objects.equals(s, "hello"); // false — null-safe
+```
+
+#### compareTo() vs equals()
+
+`compareTo()` returns 0 for equal strings but also provides lexicographic ordering (used in `TreeMap`, sorting). `equals()` is boolean — only equality.
+
+---
+
+### Q-S4: String, StringBuilder, StringBuffer — when to use which?
+
+| | `String` | `StringBuilder` | `StringBuffer` |
+|---|---|---|---|
+| Mutability | Immutable | Mutable | Mutable |
+| Thread-safe | Yes (immutable) | **No** | Yes (synchronized) |
+| Performance | Slow for concat loops | **Fastest** | Slower than StringBuilder |
+| Since | Java 1.0 | Java 1.5 | Java 1.0 |
+| Use case | Values, keys, constants | Single-thread building | Legacy; rarely needed |
+
+#### The classic mistake
+
+```java
+// BAD — creates N intermediate String objects in the loop
+String result = "";
+for (String word : words) {
+    result += word + " ";  // each += allocates a new String
+}
+
+// GOOD — one StringBuilder, in-place append
+StringBuilder sb = new StringBuilder();
+for (String word : words) {
+    sb.append(word).append(' ');
+}
+String result = sb.toString();
+```
+
+For 10,000 words, the bad version does 10,000 allocations and copies O(N²) characters. The StringBuilder version is O(N).
+
+#### Internal capacity / doubling
+
+`StringBuilder` uses an internal `char[]` / `byte[]` with capacity. Default capacity is 16. When exceeded, it doubles: 16 → 34 → 70 → ...
+
+```java
+// Pre-size when total length is known to avoid reallocations
+StringBuilder sb = new StringBuilder(words.size() * 12);
+```
+
+#### When StringBuilder is NOT needed
+
+```java
+// Simple one-liner — compiler turns this into a single String constant
+String s = "Hello, " + name + "!";  // Java 9+ → invokedynamic / StringConcatFactory
+```
+
+Since Java 9, `javac` replaces simple `+` concatenation with `invokedynamic` calling `StringConcatFactory`, which uses `MethodHandle`-based strategies that are faster than explicit `StringBuilder` in many cases.
+
+#### StringBuffer — when to use it
+
+Almost never in new code. If you truly need a shared mutable string builder across threads, use `StringBuilder` inside a `synchronized` block or a `ThreadLocal<StringBuilder>` — both are clearer about intent. `StringBuffer` exists because it predates `StringBuilder` (Java 1.5).
+
+---
+
+### Q-S5: How does String interning work? When should you use intern()?
+
+`String.intern()` checks the String Pool for an equal string. If found, returns the pooled reference. If not, inserts the string into the pool and returns it.
+
+```java
+String a = new String("hello");  // heap object, not in pool
+String b = a.intern();            // finds "hello" in pool (added at class load), returns pool ref
+String c = "hello";               // pool ref
+
+System.out.println(b == c);  // true
+System.out.println(a == c);  // false
+```
+
+#### intern() use case — memory optimisation for repeated strings
+
+Imagine parsing 10 million log lines where the "level" field is always one of: `DEBUG`, `INFO`, `WARN`, `ERROR`. Without interning, you have 10 million distinct `String` objects. With interning, only 4 objects exist in the pool.
+
+```java
+// Log parser optimisation
+public LogEntry parse(String line) {
+    String level = extractLevel(line).intern();  // deduplicate
+    // ...
+}
+```
+
+**When NOT to use intern():**
+- For unique strings (UUIDs, URLs) — wastes pool space with strings that never repeat.
+- The pool's `StringTable` is a native hash map with fixed number of buckets (default 65536 pre-Java 11, larger after). Excessive interning causes hash collisions and slows down all pool lookups.
+
+#### Java 8u20+ G1 String Deduplication
+
+An alternative to `intern()` for heap pressure: the G1 GC can automatically deduplicate `String` objects in the heap (not the pool) during concurrent marking:
+
+```bash
+-XX:+UseG1GC -XX:+UseStringDeduplication
+```
+
+This targets the `byte[]` array, not the `String` wrapper object. Two separate `String` objects can end up sharing the same `byte[]`. Less invasive than interning, no pool pressure.
+
+---
+
+### Q-S6: String memory leaks — the substring() trap in Java 6
+
+In Java 6, `String.substring()` did **not** copy the underlying `char[]`. It returned a new `String` object that held a reference to the **original full array**, with an `offset` and `count` to define the view.
+
+```
+Java 6 internal layout:
+String("hello world")  →  char[] {'h','e','l','l','o',' ','w','o','r','l','d'}
+String("hello")        →  same char[], offset=0, count=5
+```
+
+**The leak:**
+
+```java
+// Java 6 — this holds the entire content of a 100 MB file in memory
+String huge = readEntireFile("bigfile.txt");  // char[] of 50 million chars
+String id   = huge.substring(0, 10);          // small String, but references the 50M char[]
+huge = null;
+// GC cannot collect the 50M char[] because `id` still references it!
+```
+
+**The Java 6 workaround:**
+
+```java
+String id = new String(huge.substring(0, 10));  // copies the 10 chars into a new array
+```
+
+**Java 7u6+ fix:** `substring()` now copies the relevant portion into a new `char[]`. No more leak.
+
+```
+Java 7+ internal layout:
+String("hello")  →  new char[] {'h','e','l','l','o'}  // independent copy
+```
+
+This is a classic interview story that demonstrates you understand the relationship between `String`'s API and its memory model.
+
+---
+
+### Q-S7: How does String concatenation work at the bytecode level?
+
+#### Java 8 and earlier — StringBuilder
+
+```java
+String s = a + b + c;
+```
+
+`javac` compiles this to:
+
+```java
+// Decompiled equivalent
+String s = new StringBuilder().append(a).append(b).append(c).toString();
+```
+
+#### Java 9+ — invokedynamic + StringConcatFactory
+
+Java 9 introduced `invokedynamic`-based string concatenation. The `+` operator becomes:
+
+```bytecode
+invokedynamic #7, StringConcatFactory::makeConcatWithConstants
+```
+
+`StringConcatFactory` selects a strategy at runtime (using `MethodHandle`s). It can:
+- Pre-compute the final length to allocate the `byte[]` once
+- Use unsafe memory operations to write bytes directly
+- Avoid the intermediate `StringBuilder` entirely
+
+This is **faster** than the Java 8 approach because:
+- No `StringBuilder` allocation
+- No multiple bounds-checks
+- Can be specialised by the JIT per call site
+
+```java
+// You can see the strategy chosen with:
+// -Djava.lang.invoke.stringConcat.debug=true
+```
+
+#### Concat in loops — still use StringBuilder explicitly
+
+Even with `StringConcatFactory`, a `+` inside a loop creates a new concat operation per iteration. The JIT cannot generally hoist the allocation out of the loop:
+
+```java
+// Still creates N intermediate strings
+for (int i = 0; i < 1000; i++) {
+    result = result + items[i];  // new concat each iteration
+}
+```
+
+The rule: use `StringBuilder` inside loops; `+` is fine for one-liner expressions.
+
+---
+
+### Q-S8: Char array vs String for storing passwords — why?
+
+**Use `char[]`, never `String`, for passwords.** This is a security requirement, not a style preference.
+
+#### Reason 1: String immutability prevents zeroing
+
+```java
+String password = "s3cr3t";
+// ... use password
+// PROBLEM: you cannot zero out a String's internal array
+// "s3cr3t" stays in memory until GC runs — could be seconds or minutes
+password = null;   // only removes the reference; the char[] still exists on the heap
+```
+
+A heap dump or memory scan taken before GC runs will expose the password in plain text.
+
+```java
+char[] password = readPassword();
+// ... use password
+Arrays.fill(password, '\0');  // immediate zeroing — password gone from memory NOW
+```
+
+#### Reason 2: String pool retains the value longer
+
+If the password is a literal or is intern'd, it goes to the String Pool, which is GC'd even less frequently and could survive for the entire JVM lifetime.
+
+#### Reason 3: Logging / toString() risk
+
+`String.toString()` returns `this` — the content. A `char[]` printed with `System.out.println` prints the array's address (via `Object.toString()`), not the content.
+
+```java
+String pass = "secret";
+System.out.println(pass);       // prints: secret    ← accidental log exposure
+
+char[] pass = {'s','e','c','r','e','t'};
+System.out.println(pass);       // prints: secret    ← actually PrintStream has special char[] handling
+System.out.println(Arrays.toString(pass));  // prints: [s, e, c, r, e, t] ← still exposed
+// Better: just don't log passwords at all
+```
+
+#### Java's own APIs use char[]
+
+`java.io.Console.readPassword()` returns `char[]`. Spring Security's `PasswordEncoder` works with `CharSequence`. The Java crypto APIs (`PBEKeySpec`) accept `char[]`.
+
+```java
+Console console = System.console();
+char[] password = console.readPassword("Enter password: ");
+try {
+    authenticate(password);
+} finally {
+    Arrays.fill(password, '\0');  // guaranteed cleanup
+}
+```
+
+---
+
+### Q-S9: How are Strings implemented internally? (byte[] in Java 9+)
+
+#### Before Java 9 — char[] (UTF-16, 2 bytes per char)
+
+```java
+// Pre-Java 9 (simplified)
+public final class String {
+    private final char[] value;  // always UTF-16, 2 bytes per char
+}
+```
+
+Problem: Most strings in real applications contain only ASCII/Latin-1 characters (a-z, 0-9, common symbols). Each character consumed 2 bytes — 50% wasted for pure ASCII content.
+
+#### Java 9+: Compact Strings (JEP 254)
+
+```java
+// Java 9+ (simplified)
+public final class String {
+    private final byte[] value;  // the content
+    private final byte coder;    // encoding: LATIN1=0, UTF16=1
+}
+```
+
+**How it works:**
+
+- If all characters fit in Latin-1 (U+0000 to U+00FF), the string is stored as **1 byte per char** (`coder = LATIN1`).
+- If any character requires UTF-16 (emoji, CJK, etc.), the string is stored as **2 bytes per char** (`coder = UTF16`).
+- All `String` methods check `coder` and dispatch to either `StringLatin1` or `StringUTF16` helper classes.
+
+```java
+String ascii = "Hello";   // 5 bytes (LATIN1)
+String emoji = "Hi 🎉";   // 8 bytes (UTF16: 4 chars × 2 bytes)
+```
+
+#### Memory impact
+
+For a typical web application with mostly ASCII strings, Compact Strings reduce `String` memory footprint by **~40-50%**. This was a significant JVM-wide improvement:
+- Smaller heap → fewer GC pauses
+- Better CPU cache utilisation (denser data)
+- No API changes required
+
+#### String's internal hash function
+
+```java
+// Compact Strings dispatch to LATIN1 or UTF16 hash implementation
+// LATIN1 hash (each byte contributes)
+int h = 0;
+for (byte v : value) {
+    h = 31 * h + (v & 0xff);
+}
+```
+
+The multiplier 31 is chosen because `31 * i == (i << 5) - i` — the JIT replaces this with a shift and subtract, which is faster than multiplication on most CPUs.
+
+---
+
+### Q-S10: Text Blocks, String methods from Java 11–21
+
+#### Text Blocks (Java 15 — stable, JEP 378)
+
+Text blocks eliminate escape noise for multi-line strings (JSON, SQL, HTML):
+
+```java
+// Old way
+String json = "{\n" +
+              "  \"name\": \"Alice\",\n" +
+              "  \"age\": 30\n" +
+              "}";
+
+// Text block — Java 15+
+String json = """
+        {
+          "name": "Alice",
+          "age": 30
+        }
+        """;
+```
+
+**Indentation stripping:** The closing `"""` sets the indentation baseline. Leading whitespace up to that column is stripped.
+
+**Escape sequences in text blocks:**
+```java
+String sql = """
+        SELECT *
+        FROM users   \
+        WHERE id = ?
+        """;
+// \  at end of line → no newline (line continuation)
+// \s → explicit space (prevents trailing whitespace stripping)
+```
+
+#### String methods added in Java 11–21
+
+```java
+// Java 11
+" hello ".strip();            // "hello" — Unicode-aware (vs trim() which is ASCII-only)
+" ".isBlank();                 // true — empty or whitespace only
+"a\nb\nc".lines()             // Stream<String>: ["a", "b", "c"]
+"ha".repeat(3);               // "hahaha"
+" hello ".stripLeading();     // "hello "
+" hello ".stripTrailing();    // " hello"
+
+// Java 12
+"hello\nworld".indent(4);     // adds 4 spaces before each line
+"123".transform(Integer::parseInt);  // applies function, returns Integer
+
+// Java 15 (Text Blocks)
+"""
+  hello
+""".stripIndent();            // programmatic indent stripping
+"hello %s".formatted("world");  // "hello world" — instance method, same as String.format
+
+// Java 21 (Pattern Matching in switch + String patterns — preview)
+Object obj = "hello";
+switch (obj) {
+    case String s when s.length() > 3 -> System.out.println("Long string: " + s);
+    case String s                      -> System.out.println("Short: " + s);
+    default                            -> System.out.println("Not a string");
+}
+```
+
+#### strip() vs trim()
+
+```java
+String s = " hello ";  // Unicode em-space
+s.trim();    // " hello " — does NOT remove Unicode whitespace
+s.strip();   // "hello"            — uses Character.isWhitespace() which covers Unicode
+```
+
+Always prefer `strip()` over `trim()` in Java 11+ code.
+
+#### String.format() vs formatted() vs text blocks
+
+```java
+// Pre-11 idiom
+String msg = String.format("User %s has %d items", name, count);
+
+// Java 15+ — instance method, fluent
+String msg = "User %s has %d items".formatted(name, count);
+
+// Java 21 — String Templates (JEP 430, preview in 21, stable planned for 23+)
+// String msg = STR."User \{name} has \{count} items";  // still preview
+```
+
+---
+
+## 3. Java Memory Management and Garbage Collection
 
 ---
 
