@@ -7083,3 +7083,134 @@ Single writer, 8 readers:
 ---
 
 *End of Document — Java Interview Questions: A 15-Year Veteran's Deep Dive (Java 8 through Java 21)*
+
+---
+
+## JVM Performance Debugging — Production Scenarios
+
+### Q: You've been in Java for 16 years. Tell me about a specific performance problem you debugged in production — something where the JVM itself was the suspect. Did you ever deal with GC pauses, memory leaks, thread contention, or OutOfMemory issues? Walk me through how you diagnosed and fixed it.
+
+---
+
+### Scenario 1: GC Pauses — The "Dashboard Freezes During Discovery" Problem
+
+**The Situation:**
+In OpenManage Enterprise, when you trigger discovery of a large datacenter — say 5,000–10,000 Dell servers simultaneously — the dashboard would periodically freeze for 8–15 seconds. Users thought it was a network issue. I suspected the JVM.
+
+**What GC Pause means (in plain words):**
+The JVM manages memory automatically. When it runs out of working memory (heap), it stops everything — all your application threads — to clean up unused objects. This "Stop the World" pause is called a **GC pause**. For 2–3 seconds it's tolerable. For 15 seconds in a production monitoring tool, it's a P1 incident.
+
+**How I diagnosed it:**
+- Enabled JVM GC logging: `-Xlog:gc*:file=gc.log:time,uptime:filecount=5,filesize=20m`
+- Looked at the logs — saw **Full GC events every 4–5 minutes** taking 12–15 seconds each
+- Used **Java VisualVM** to look at heap usage — it was sawtoothing: heap filling to 90%, then GC kicking in, dropping to 30%, then filling again rapidly
+- Root cause: During discovery, we were loading full server inventory objects (firmware, hardware, NIC, BIOS details) into memory for all discovered servers **at once** before persisting to PostgreSQL. We were creating ~500MB of short-lived objects in one sweep.
+
+**The Fix:**
+- Switched from batch-all to **pagination** — process 500 servers at a time, commit to DB, release memory
+- Tuned JVM: changed from default GC to **G1GC** (`-XX:+UseG1GC`) which handles large heaps better with shorter, more frequent pauses instead of rare long ones
+- Set `-XX:MaxGCPauseMillis=200` to tell G1GC to target max 200ms pauses
+- Increased heap from 2GB to 4GB (`-Xms2g -Xmx4g`) to reduce GC frequency
+
+**Result:** GC pause dropped from 12 seconds to under 300ms. Discovery of 10,000 servers no longer froze the UI.
+
+---
+
+### Scenario 2: Memory Leak — ThreadLocal Not Cleaned Up in Tomcat
+
+**The Situation:**
+In OME, our REST API layer runs on Apache Tomcat. We were using `ThreadLocal` to store the currently-logged-in user's session context (username, role, tenant) so any method deep in the call stack could access it without passing it as a parameter everywhere.
+
+After a few days in production, Tomcat's memory kept growing. No OOM yet, but the heap trend was always upward — never coming back down even during low traffic.
+
+**What ThreadLocal is (plain words):**
+`ThreadLocal` is a Java feature that lets each thread have its own private copy of a variable. Think of it like a locker — Thread A has locker A, Thread B has locker B. They don't share.
+
+```java
+// We stored user context like this
+private static ThreadLocal<UserContext> userContext = new ThreadLocal<>();
+
+// Set at start of each request
+userContext.set(new UserContext(username, role));
+
+// Read anywhere in the call chain
+UserContext ctx = userContext.get();
+```
+
+**The Problem — Why it Leaks:**
+Tomcat uses a **thread pool**. It doesn't create a new thread per request — it reuses the same threads. Thread-1 handles Request-1, then Thread-1 handles Request-2, then Request-3...
+
+If you set a `ThreadLocal` value at the start of a request but **never call `remove()`** at the end, that value sits in Thread-1's locker forever. The `UserContext` object can never be garbage collected because the thread (which is alive permanently in the pool) still holds a reference to it.
+
+With 200 threads in the pool, each holding stale `UserContext` objects from thousands of past requests — memory grows and never returns.
+
+```
+Thread-1 → holds UserContext from Request #1 (never removed)
+Thread-2 → holds UserContext from Request #499 (never removed)
+...
+Thread-200 → holds UserContext from Request #12043 (never removed)
+```
+
+**How I Diagnosed It:**
+- Heap dump with `jmap -dump:format=b,file=heap.hprof <pid>`
+- Opened in **Eclipse MAT** → looked at Dominator Tree
+- Saw hundreds of `UserContext` objects held alive by `java.lang.Thread` instances (Tomcat's pooled threads)
+- The reference chain was: `Thread → ThreadLocalMap → Entry → UserContext`
+- That's the signature of a ThreadLocal leak — objects owned by the thread itself, not by your application code
+
+**The Fix:**
+Added `remove()` in a **Servlet Filter** that wraps every request — guaranteed cleanup whether the request succeeded or threw an exception:
+
+```java
+@Component
+public class UserContextFilter implements Filter {
+
+    @Override
+    public void doFilter(ServletRequest req, ServletResponse res, FilterChain chain)
+            throws IOException, ServletException {
+        try {
+            UserContext ctx = extractFromToken(req);
+            UserContextHolder.set(ctx);        // set ThreadLocal
+            chain.doFilter(req, res);          // run the actual request
+        } finally {
+            UserContextHolder.remove();        // ALWAYS clean up
+        }
+    }
+}
+```
+
+The `finally` block is the key — it runs even if an exception is thrown mid-request.
+
+**Result:**
+Heap growth flatlined. Memory stayed stable over weeks. The fix was 3 lines of code — but finding the cause took real diagnosis.
+
+**The Interview Line:**
+> *"The tricky part about ThreadLocal leaks is that the objects look 'reachable' to the GC — they're referenced by live threads — so GC never collects them. It's not a bug in your business logic, it's a misuse of a Java concurrency primitive. Heap dump + MAT is the only reliable way to catch it."*
+
+---
+
+### Scenario 3: Thread Contention — Firmware Update Deadlock
+
+**The Situation:**
+OME allows bulk firmware updates across thousands of servers. We had a case where update jobs would start, progress would show 20%... then hang forever. CPU was near zero. The service was alive but doing nothing. Classic **thread contention / deadlock** symptom.
+
+**What Thread Contention means:**
+Your application uses a thread pool to do work in parallel. Thread contention happens when multiple threads compete for the same lock/resource — they block each other. In the worst case (deadlock), Thread A waits for Thread B's lock, and Thread B waits for Thread A's lock. Both wait forever.
+
+**How I diagnosed it:**
+- Took a **thread dump**: `jstack <pid> > threaddump.txt`
+- Searched for `BLOCKED` and `waiting to lock` in the dump
+- Found: Thread-pool-12 was holding a lock on the `UpdateJobRegistry` object while waiting for a database connection from the connection pool. Meanwhile, Thread-pool-7 had a database connection but was blocked trying to acquire the lock on `UpdateJobRegistry` to log its status. Classic deadlock.
+
+**The Fix:**
+- Eliminated the shared `synchronized` block on `UpdateJobRegistry` — replaced it with **ConcurrentHashMap** (lock-free for reads, fine-grained locks for writes)
+- Separated the "update job state tracking" from the "DB write" operation — no more holding a lock while waiting on DB
+- Configured a timeout on DB connection pool (HikariCP): `connectionTimeout=30000` — so threads don't wait indefinitely
+- Added thread dump capture to our monitoring alerts as a runbook step
+
+**Result:** Deadlock eliminated. Bulk firmware update for 2,000 servers completed without hangs.
+
+---
+
+**How to Frame This in the Interview:**
+> *"At Dell, OME manages 100,000+ servers, so scale-related JVM issues were real production problems for us — not academic. I dealt with all three: GC pauses during mass server discovery, a ThreadLocal memory leak in our REST API layer, and a thread deadlock during bulk firmware updates. In each case, my first step was always instrumentation — GC logs, heap dumps, or thread dumps — before assuming anything. I never guessed at JVM problems; the tools tell you exactly what's wrong."*
