@@ -1,0 +1,15 @@
+// Module 2 — Producers
+
+task runBasicProducer(type: JavaExec) {
+    group = 'kafka-demo'
+    description = 'Fire-and-forget, async callback, and sync send patterns'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'com.kafka.demo.BasicProducer'
+}
+
+task runCustomPartitioner(type: JavaExec) {
+    group = 'kafka-demo'
+    description = 'Custom partitioner routing premium vs standard orders'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'com.kafka.demo.CustomPartitionerDemo'
+}

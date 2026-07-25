@@ -1,0 +1,35 @@
+// Root build file — common config applied to all submodules via subprojects block
+
+ext {
+    kafkaVersion   = '3.7.0'
+    slf4jVersion   = '2.0.13'
+    logbackVersion = '1.5.6'
+    jacksonVersion = '2.17.1'
+}
+
+subprojects {
+    apply plugin: 'java'
+
+    java {
+        sourceCompatibility = JavaVersion.VERSION_21
+        targetCompatibility = JavaVersion.VERSION_21
+    }
+
+    repositories {
+        mavenCentral()
+    }
+
+    dependencies {
+        implementation "org.apache.kafka:kafka-clients:${rootProject.ext.kafkaVersion}"
+        implementation "org.slf4j:slf4j-api:${rootProject.ext.slf4jVersion}"
+        implementation "ch.qos.logback:logback-classic:${rootProject.ext.logbackVersion}"
+        implementation "com.fasterxml.jackson.core:jackson-databind:${rootProject.ext.jacksonVersion}"
+    }
+
+    // Run any main class via:
+    //   .\gradlew :<module>:run -PmainClass=com.kafka.demo.ClassName
+    tasks.register('run', JavaExec) {
+        classpath = sourceSets.main.runtimeClasspath
+        mainClass = project.findProperty('mainClass') ?: 'com.kafka.demo.Main'
+    }
+}

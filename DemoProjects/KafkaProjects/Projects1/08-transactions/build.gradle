@@ -1,0 +1,8 @@
+// Module 8 — Transactions
+
+task runTransactionalProducer(type: JavaExec) {
+    group = 'kafka-demo'
+    description = 'Exactly-once semantics using Kafka transactions'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'com.kafka.demo.TransactionalProducerDemo'
+}

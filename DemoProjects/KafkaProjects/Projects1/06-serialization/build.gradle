@@ -1,0 +1,18 @@
+// Module 6 - Serialization
+
+// Produces AND consumes in one shot
+task runJsonSerialization(type: JavaExec) {
+    group = 'kafka-demo'
+    description = 'Produce and consume JSON objects using Jackson serializers'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'com.kafka.demo.JsonSerializationDemo'
+}
+
+// Produces only — run this multiple times, then watch count grow in Kafka UI
+task runJsonProducerOnly(type: JavaExec) {
+    group = 'kafka-demo'
+    description = 'Produce JSON orders only (no consumer) — watch count grow in Kafka UI'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'com.kafka.demo.JsonSerializationDemo'
+    args = ['produce-only']
+}

@@ -1,0 +1,8 @@
+// Module 5 — Partitions & Offsets
+
+task runPartitionExplorer(type: JavaExec) {
+    group = 'kafka-demo'
+    description = 'Explore partition metadata, seek to offset, replay messages'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'com.kafka.demo.PartitionOffsetExplorer'
+}

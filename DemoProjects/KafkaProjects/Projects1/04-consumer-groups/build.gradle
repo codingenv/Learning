@@ -1,0 +1,9 @@
+// Module 4 — Consumer Groups
+
+task runConsumerGroupDemo(type: JavaExec) {
+    group = 'kafka-demo'
+    description = 'Simulate partition rebalancing across multiple consumers'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'com.kafka.demo.ConsumerGroupDemo'
+    standardInput = System.in
+}

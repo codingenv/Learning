@@ -1,0 +1,4 @@
+// Module 7 needs the kafka-streams artifact in addition to kafka-clients
+dependencies {
+    implementation "org.apache.kafka:kafka-streams:${rootProject.ext.kafkaVersion}"
+}

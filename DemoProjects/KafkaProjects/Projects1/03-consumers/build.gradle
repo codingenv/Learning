@@ -1,0 +1,18 @@
+// Module 3 — Consumers
+
+task runBasicConsumer(type: JavaExec) {
+    group = 'kafka-demo'
+    description = 'Basic consumer loop with manual offset commit'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'com.kafka.demo.BasicConsumer'
+    // Keep running until Ctrl+C
+    standardInput = System.in
+}
+
+task runManualOffsetConsumer(type: JavaExec) {
+    group = 'kafka-demo'
+    description = 'Per-partition manual offset control and seek demo'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'com.kafka.demo.ManualOffsetConsumer'
+    standardInput = System.in
+}

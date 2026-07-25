@@ -1,0 +1,10 @@
+rootProject.name = 'kafka-learning'
+
+include '01-basics'
+include '02-producers'
+include '03-consumers'
+include '04-consumer-groups'
+include '05-partitions-offsets'
+include '06-serialization'
+include '07-kafka-streams'
+include '08-transactions'

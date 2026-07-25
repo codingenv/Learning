@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="GradleMigrationSettings" migrationVersion="1" />
+  <component name="GradleSettings">
+    <option name="linkedExternalProjectsSettings">
+      <GradleProjectSettings>
+        <option name="externalProjectPath" value="$PROJECT_DIR$" />
+        <option name="gradleJvm" value="#JAVA_HOME" />
+        <option name="modules">
+          <set>
+            <option value="$PROJECT_DIR$" />
+            <option value="$PROJECT_DIR$/01-basics" />
+            <option value="$PROJECT_DIR$/02-producers" />
+            <option value="$PROJECT_DIR$/03-consumers" />
+            <option value="$PROJECT_DIR$/04-consumer-groups" />
+            <option value="$PROJECT_DIR$/05-partitions-offsets" />
+            <option value="$PROJECT_DIR$/06-serialization" />
+            <option value="$PROJECT_DIR$/07-kafka-streams" />
+            <option value="$PROJECT_DIR$/08-transactions" />
+          </set>
+        </option>
+      </GradleProjectSettings>
+    </option>
+  </component>
+</project>

@@ -1,0 +1,15 @@
+// Module 1 — Basics & Admin API
+
+task runConcepts(type: JavaExec) {
+    group = 'kafka-demo'
+    description = 'Print Kafka concepts overview (no broker needed)'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'com.kafka.demo.KafkaConceptsOverview'
+}
+
+task runAdmin(type: JavaExec) {
+    group = 'kafka-demo'
+    description = 'Create, list, describe and delete topics via AdminClient'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'com.kafka.demo.TopicAdminDemo'
+}
