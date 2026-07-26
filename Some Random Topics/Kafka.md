@@ -1435,5 +1435,5 @@ This guide covers the essential concepts and deep technical details that form th
 
 ## Links
 
-https://www.youtube.com/watch?v=HGLtFOZLtNI
-https://www.youtube.com/watch?v=ZJJHm_bd9Zo
+https://www.youtube.com/watch?v=HGLtFOZLtNI  : INterview question
+https://www.youtube.com/watch?v=ZJJHm_bd9Zo : Explanations.
