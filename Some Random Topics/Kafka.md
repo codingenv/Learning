@@ -1432,3 +1432,8 @@ This guide covers the essential concepts and deep technical details that form th
 - Books: "Kafka: The Definitive Guide" by Neha Narkhede, Gwen Shapira, Todd Palino
 
 **Version Note**: This guide covers concepts up to Kafka 3.x series, including KRaft mode. Always refer to the official documentation for the specific version you're using.
+
+## Links
+
+https://www.youtube.com/watch?v=HGLtFOZLtNI  : INterview question
+https://www.youtube.com/watch?v=ZJJHm_bd9Zo : Explanations.
