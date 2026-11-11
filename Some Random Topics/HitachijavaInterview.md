@@ -1378,3 +1378,171 @@ across unrelated concerns), monitoring (`getActiveCount()`,
 `getQueue().size()`, custom metrics), timeouts on blocking operations
 inside tasks, and always pairing `ExecutorService` creation with a
 guaranteed `shutdown()` (try/finally or a managed lifecycle/DI container).
+
+---
+
+## 37. Design a custom String pool in Java. What design choices matter?
+
+This is the natural follow-up to Q31 — it tests whether you understand the
+built-in pool's guarantees (content-equality → identity, thread safety,
+GC-ability) well enough to **rebuild them deliberately** and reason about
+knobs the JVM-global pool doesn't give you: scoping, bounded memory, and
+instrumentation.
+
+**What any String pool must guarantee:**
+1. **Content equality → identity** — interning two equal-content strings
+   returns the *same* object reference.
+2. **Thread safety** — concurrent interning must never leave two different
+   "canonical" instances alive for the same content.
+3. **No uncontrolled leak** — shouldn't keep every ever-interned string
+   alive forever by default (the exact criticism leveled at indiscriminate
+   `.intern()` use in Q31).
+
+### Approach 1 — minimal correct version (say this first)
+
+The core trick is a map used as a **set-with-lookup**: key and value are
+the same object, so a lookup returns the canonical instance.
+
+```java
+public final class StringPool {
+    private final ConcurrentHashMap<String, String> pool = new ConcurrentHashMap<>();
+
+    public String intern(String s) {
+        return pool.computeIfAbsent(s, key -> key);
+    }
+
+    public int size() {
+        return pool.size();
+    }
+}
+```
+
+**Why `computeIfAbsent` and not `get` + `put`:** a plain
+"if absent, then put" is a classic **check-then-act race** — two threads
+can both see "not present" and each insert a *different* object for equal
+content, breaking the identity guarantee. `computeIfAbsent` is atomic per
+key on `ConcurrentHashMap`, so only one thread's string ever "wins" and
+becomes canonical; the other thread transparently gets that same instance
+back.
+
+This is functionally what `String.intern()` itself does conceptually —
+just scoped to an instance **you** own instead of the JVM-wide pool. Fine
+when the vocabulary is small and known in advance (protocol keywords,
+enum-like tokens). **Drawback:** entries live as long as the pool instance
+does — feed it unbounded/unique runtime strings (user input, generated
+IDs) and it becomes an unbounded memory leak, same failure mode called out
+against careless `.intern()` in Q31.
+
+### Approach 2 — weak-reference based, to avoid the leak
+
+Mirrors what the JVM pool gained in Java 7: pooled entries should be
+**collectible** once nothing outside the pool references them anymore.
+
+```java
+public final class WeakStringPool {
+    private final ConcurrentHashMap<String, KeyedWeakReference> pool = new ConcurrentHashMap<>();
+    private final ReferenceQueue<String> staleRefs = new ReferenceQueue<>();
+
+    public String intern(String s) {
+        Objects.requireNonNull(s);
+        expungeStaleEntries();
+
+        KeyedWeakReference existingRef = pool.get(s);
+        String existing = (existingRef != null) ? existingRef.get() : null;
+        if (existing != null) {
+            return existing;
+        }
+
+        KeyedWeakReference ref = pool.computeIfAbsent(s,
+                key -> new KeyedWeakReference(key, staleRefs));
+        String canonical = ref.get();
+        if (canonical == null) {
+            // Reference died between computeIfAbsent and get() — retry.
+            pool.remove(s, ref);
+            return intern(s);
+        }
+        return canonical;
+    }
+
+    private void expungeStaleEntries() {
+        Reference<? extends String> ref;
+        while ((ref = staleRefs.poll()) != null) {
+            KeyedWeakReference keyed = (KeyedWeakReference) ref;
+            pool.remove(keyed.key, keyed);
+        }
+    }
+
+    public int size() {
+        return pool.size();
+    }
+
+    private static final class KeyedWeakReference extends WeakReference<String> {
+        final String key;
+        KeyedWeakReference(String key, ReferenceQueue<String> queue) {
+            super(key, queue);
+            this.key = key;
+        }
+    }
+}
+```
+
+**Why not just a plain `WeakHashMap<String, String>`?** `WeakHashMap`
+makes the *key* weak, but the *value* you store is the same object as the
+key — the map itself ends up holding a strong reference back to the exact
+instance it was supposed to let go of, so the entry can never actually
+become collectible. This is a well-known interner gotcha: you need the
+**value** to be weak (via an explicit `WeakReference`), not the key. This
+is also exactly how Guava's `Interners.newWeakInterner()` is implemented
+under the hood — worth name-dropping.
+
+**Why the `ReferenceQueue` matters:** once a `WeakReference`'s referent is
+collected, the map entry itself doesn't disappear automatically — it
+becomes a dead entry (reference cleared, key string still sitting in the
+map). The `ReferenceQueue` lets the pool proactively remove those dead
+entries (polled cheaply on each `intern()` call here, or on a background
+thread for low-traffic pools) instead of silently accumulating garbage
+entries forever.
+
+### Approach 3 — bounded LRU variant
+
+When you want a **hard memory cap** instead of depending on GC timing —
+e.g. interning high-cardinality but mostly-repeating values under load
+(HTTP header values, log tag names) where predictable footprint matters
+more than perfect reclamation — reuse the LRU pattern from Q34:
+`LinkedHashMap` with `accessOrder=true` plus `removeEldestEntry`, sized to
+a fixed capacity.
+
+**Key difference from a normal LRU *cache*, worth saying explicitly:**
+evicting an entry from a *pool* is always safe — worst case, you lose the
+sharing optimization and create one duplicate object next time that value
+reappears. Evicting from an LRU *cache* (Q34) loses data that may be
+expensive to recompute. A String pool can tolerate a much more aggressive
+eviction policy than a cache can, because "wrong" eviction only costs a
+missed optimization, never correctness.
+
+### Design choices to narrate out loud
+
+- **Content-based keys** — rely on `String`'s own `equals()`/`hashCode()`;
+  no custom hashing needed, unlike a general-purpose object pool.
+- **`computeIfAbsent` for atomicity** — the single most important line;
+  without it the whole identity guarantee is a race condition.
+- **Weak vs. strong vs. bounded** is the real design decision: GC-driven
+  cleanup (don't fight the JVM, same philosophy as the real pool post-Java
+  7) vs. a deterministic cap (predictable footprint, needs tuning). Pick
+  based on whether input cardinality is bounded/known.
+- **Scoping** — unlike the JVM-wide intern pool, a custom pool instance can
+  be created per-parser, per-request, or per-session and **discarded
+  wholesale** when that scope ends, letting GC reclaim everything at once.
+  This is the main reason to build your own instead of just calling
+  `.intern()` — you get a lifecycle you control.
+- **Instrumentation** — expose `size()`/hit-rate metrics; the built-in pool
+  gives you none of that visibility.
+
+### When you'd actually reach for this in real code
+
+Parsers and decoders that see the same token content repeatedly across
+thousands of parsed objects — JSON field names, XML tag/attribute names,
+HTTP header names, CSV column headers. Interning collapses all repeats to
+one shared instance for the duration of a parse session, and then the
+**entire pool** is discarded together when that session ends — something
+you can't do with the global, JVM-lifetime `.intern()` pool.
