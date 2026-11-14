@@ -1,0 +1,775 @@
+1. Streams in java?
+
+2. Suppose there are 20 threads. 1 thread has executed its task and sitting idle. How the system will know that this thread is idle ?
+	Here’s how to check a Java thread pool in VisualVM:
+	1. Start your Java application, then open VisualVM. Under Applications → Local, find your process and double-click it. If it doesn’t appear, make sure VisualVM can access the JVM running your app; applications running as a service or under another user may need extra setup.
+	2. Open the Threads tab. You’ll see a timeline of thread activity and a list of threads. Find your worker by its name—pools often name workers like pool-1-thread-1. The thread names come from your application or pool configuration.
+	3. Wait until the task has finished. If the worker is waiting for another task, its status may show as WAITING or TIMED_WAITING. Select it to inspect its activity and details.
+	4. Click Thread Dump to capture a snapshot of all threads and their stack traces. Look for your worker’s name and state:
+	   - A stack containing LinkedBlockingQueue.take() often means the pool worker is waiting for a task.
+	   - LockSupport.park() often means it is parked while waiting.
+	   - BLOCKED usually means it is waiting to acquire a lock.
+	   - A thread in RUNNABLE may be doing work, but that state alone doesn’t guarantee it is using CPU.
+	5. Take another dump a few seconds later. Comparing snapshots helps distinguish a worker that stays waiting for work from one that is stuck or repeatedly blocked. VisualVM’s Threads tab provides thread activity timelines and lets you capture thread dumps without stopping the application. VisualVM Threads documentation
+	For a pool you control, the application can also report its own metrics—for example, ThreadPoolExecutor.getActiveCount() and getQueue().size(). VisualVM shows thread state; pool metrics tell you whether the pool has queued tasks waiting to run.
+	
+3. What are cache eviction policies?
+	A cache eviction policy decides which cached item to remove when the cache is full and needs room for something new.
+
+		Common policies include:
+		- LRU (Least Recently Used): Remove the item that hasn’t been accessed for the longest time. Useful when recently used items are likely to be used again.
+		- LFU (Least Frequently Used): Remove the item accessed the fewest times. Useful when popular items tend to stay popular.
+		- FIFO (First In, First Out): Remove the oldest item added, regardless of how often it was used.
+		- TTL (Time to Live): Expire items after a set duration. Often combined with another policy, such as LRU.
+		- Random: Remove a randomly chosen item. Simple and sometimes effective for large caches.
+		
+4.Suppose you have 5 tyres in the car and you want to use each of them equally to travel 1000 km. How will you achieve this ?
+	Assuming the car uses 4 tyres at a time, rotate all 5 so each tyre spends the same distance on the car.
+	Across 1,000 km, the car uses \(4 \times 1{,}000 = 4{,}000\) tyre-km. Split equally among 5 tyres: 800 km per tyre.
+	One simple schedule: drive 200 km, then swap the spare with one tyre on the car. Repeat, rotating a different tyre out each time. After five 200 km legs, each tyre will have been used for four legs (800 km) and served as the spare for one leg (200 km).
+
+5.LRU Cache Program.
+
+	import java.util.HashMap;
+
+	public class LruCache {
+		private final int capacity;
+		private final HashMap<Integer, Node> map = new HashMap<>();
+
+		private final Node dummyHead = new Node(0, 0);
+		private final Node dummyTail = new Node(0, 0);
+
+		private static class Node {
+			int key;
+			int value;
+			Node prev;
+			Node next;
+
+			Node(int key, int value) {
+				this.key = key;
+				this.value = value;
+			}
+		}
+
+		public LruCache(int capacity) {
+			if (capacity <= 0) {
+				throw new IllegalArgumentException("Capacity must be positive");
+			}
+			this.capacity = capacity;
+
+			dummyHead.next = dummyTail;
+			dummyTail.prev = dummyHead;
+		}
+
+		public int get(int key) {
+			Node node = map.get(key);
+
+			if (node == null) {
+				return -1;
+			}
+
+			remove(node);
+			addAfterHead(node);
+			return node.value;
+		}
+
+		public void put(int key, int value) {
+			Node node = map.get(key);
+
+			if (node != null) {
+				node.value = value;
+				remove(node);
+				addAfterHead(node);
+				return;
+			}
+
+			node = new Node(key, value);
+			map.put(key, node);
+			addAfterHead(node);
+
+			if (map.size() > capacity) {
+				Node leastRecentlyUsed = dummyTail.prev;
+				remove(leastRecentlyUsed);
+				map.remove(leastRecentlyUsed.key);
+			}
+		}
+		
+		//-------- Helper Method-------------
+
+		private void addAfterHead(Node node) {
+			node.prev = dummyHead;
+			node.next = dummyHead.next;
+
+			dummyHead.next.prev = node;
+			dummyHead.next = node;
+		}
+
+		private void remove(Node node) {
+			node.prev.next = node.next;
+			node.next.prev = node.prev;
+		}
+
+		public static void main(String[] args) {
+			LruCache cache = new LruCache(2);
+
+			cache.put(1, 100);
+			cache.put(2, 200);
+			cache.get(1);       // Key 1 becomes most recently used
+			cache.put(3, 300);  // Evicts key 2
+
+			System.out.println(cache.get(2)); // -1
+			System.out.println(cache.get(1)); // 100
+			System.out.println(cache.get(3)); // 300
+		}
+	}
+	
+6. Value based sorting in HashMap.
+	class Employee {
+		int age;
+		String name;
+
+		Employee(int age, String name) {
+			this.age = age;
+			this.name = name;
+		}
+	}
+
+	public class Main {
+		public static void main(String[] args) {
+			HashMap<String, Employee> employees = new HashMap<>();
+
+			employees.put("E1", new Employee(30, "Zara"));
+			employees.put("E2", new Employee(25, "Arun"));
+			employees.put("E3", new Employee(40, "Maya"));
+
+			List<Map.Entry<String, Employee>> sorted =
+					new ArrayList<>(employees.entrySet());
+
+			Collections.sort(sorted, new Comparator<Map.Entry<String, Employee>>() {
+				@Override
+				public int compare(	Map.Entry<String, Employee> e1, Map.Entry<String, Employee> e2) {
+					return e1.getValue().name.compareTo(e2.getValue().name);
+				}
+			});
+
+			for (Map.Entry<String, Employee> entry : sorted) {
+				System.out.println(entry.getKey() + " -> " + entry.getValue().name + ", age " + entry.getValue().age);
+			}
+		}
+	}
+	
+7. Singleton class with doubly lock.
+	public class Singleton {
+		private static volatile Singleton instance;
+
+		private Singleton() {}
+
+		public static Singleton getInstance() {
+			if (instance == null) {                 // First check: no lock
+				synchronized (Singleton.class) {    // Acquire one lock
+					if (instance == null) {         // Second check: inside lock
+						instance = new Singleton();
+					}
+				}
+			}
+			return instance;
+		}
+	}
+	
+	There are not two locks here. There is one lock, acquired only by the thread that sees instance == null. The two if checks are needed because another thread may create the instance while the current thread is waiting for the lock.
+
+	volatile is required so other threads see the fully constructed instance. In many cases, the simpler initialization-on-demand holder idiom is preferable:
+	
+	public class Singleton {
+		private Singleton() {}
+
+		private static class Holder {
+			private static final Singleton INSTANCE = new Singleton();
+		}
+
+		public static Singleton getInstance() {
+			return Holder.INSTANCE;
+		}
+	}
+
+8. Explain Factory design pattern.
+	The Factory pattern puts object creation in one place. Code that needs an object asks the factory for it instead of directly calling a specific implementation’s constructor.
+
+	interface Notification {
+		void send(String message);
+	}
+
+	class EmailNotification implements Notification {
+		public void send(String message) {
+			System.out.println("Email: " + message);
+		}
+	}
+
+	class SmsNotification implements Notification {
+		public void send(String message) {
+			System.out.println("SMS: " + message);
+		}
+	}
+
+	class NotificationFactory {
+		public static Notification create(String type) {
+			if ("email".equalsIgnoreCase(type)) {
+				return new EmailNotification();
+			} else if ("sms".equalsIgnoreCase(type)) {
+				return new SmsNotification();
+			}
+
+			throw new IllegalArgumentException("Unknown notification type: " + type);
+		}
+	}
+
+	public class Main {
+		public static void main(String[] args) {
+			Notification notification = NotificationFactory.create("email");
+			notification.send("Your order has shipped");
+		}
+	}
+	
+	Main works with the Notification interface. The factory chooses which implementation to create, so callers don’t need to know the implementation’s constructor.
+	
+9. What is builder design pattern?
+	The Builder pattern creates an object step by step. It’s useful when an object has several optional fields, because it avoids long constructors with many parameters.
+
+	class Employee {
+		private final String name;
+		private final int age;
+		private final String department;
+
+		private Employee(Builder builder) {
+			this.name = builder.name;
+			this.age = builder.age;
+			this.department = builder.department;
+		}
+
+		public static class Builder {
+			private final String name; // Required
+			private int age;           // Optional
+			private String department; // Optional
+
+			public Builder(String name) {
+				this.name = name;
+			}
+
+			public Builder age(int age) {
+				this.age = age;
+				return this;
+			}
+
+			public Builder department(String department) {
+				this.department = department;
+				return this;
+			}
+
+			public Employee build() {
+				return new Employee(this);
+			}
+		}
+
+		@Override
+		public String toString() {
+			return "Employee{name='" + name + "', age=" + age
+					+ ", department='" + department + "'}";
+		}
+	}
+
+	public class Main {
+		public static void main(String[] args) {
+			Employee employee = new Employee.Builder("Asha")
+					.age(30)
+					.department("Engineering")
+					.build();
+
+			System.out.println(employee);
+		}
+	}
+	
+	The Builder collects the values, and build() creates the Employee. The required name is passed to the builder constructor; optional values can be set fluently.
+	
+10. Why Strings are immutable in java?
+	Java String objects are immutable: once created, their contents cannot be changed. 
+	Operations such as toUpperCase() return a new string instead of modifying the original.
+	String text = "hello";
+	String upper = text.toUpperCase();
+
+	System.out.println(text);  // hello
+	System.out.println(upper); // HELLO
+	Immutability is useful because it:
+		- Makes strings safe to share. Multiple parts of a program can use the same string without one changing it unexpectedly.
+		- Supports security. Values like file paths, class names, and URLs can’t be changed after they’re checked.
+		- Allows string pooling. Java can reuse string literals safely because their contents won’t change.
+		- Makes strings suitable as map keys. A string’s hash code and equality won’t change while it’s used as a key.
+		- Simplifies concurrency. Reading an immutable string from multiple threads needs no synchronization.
+	When you need to build or modify text repeatedly, use StringBuilder, then convert the result to a String.
+
+11. ArrayList Vs LinkedList
+	1. INTERNAL STORAGE
+	   ArrayList: Stores elements in a resizable array.
+	   LinkedList: Stores elements in linked nodes. Each node points to the previous and next node.
+	2. ACCESS BY INDEX
+	   ArrayList: Fast, O(1).
+	   LinkedList: Slow, O(n), because it must walk through the nodes.
+	3. ADDING AT THE END
+	   ArrayList: Usually O(1) amortized. Occasionally, it must grow its internal array.
+	   LinkedList: O(1).
+	4. INSERTING OR REMOVING IN THE MIDDLE
+	   ArrayList: O(n), because elements may need to shift.
+	   LinkedList: O(n) to reach the position, then O(1) to update the links.
+	5. MEMORY
+	   ArrayList: Uses less memory in most cases.
+	   LinkedList: Uses more memory because each node stores links.
+	WHEN TO USE
+	Use ArrayList by default, especially when you often access elements by index.
+	Use LinkedList when you frequently add or remove elements at the beginning or end.
+	For queue or deque operations, consider ArrayDeque.
+
+	EXAMPLE
+
+	List<String> names = new ArrayList<>();
+	names.add("Asha");
+	names.add("Ravi");
+
+	String firstName = names.get(0); // Fast with ArrayList
+
+12. How locking is done in concurrent hash map?
+	In Java, ConcurrentHashMap allows multiple threads to read and update the map safely without locking the entire map for every operation.
+
+	In modern Java (Java 8 and later), broadly:
+		- Reads are usually non-blocking. A get() generally does not acquire a lock.
+		- Updates use a combination of CAS (an atomic compare-and-set operation) and synchronized locking on a particular bucket/bin when needed.
+		- Threads updating different bins can often proceed concurrently. Updates to the same bin may need to wait for one another.
+		- During resizing, threads can help transfer entries to the new table.
+	This is an implementation detail and can vary by Java version. The main takeaway is that ConcurrentHashMap uses finer-grained coordination than one lock for the whole map, while still providing thread-safe operations.
+
+	Example:
+		ConcurrentHashMap<String, Integer> counts = new ConcurrentHashMap<>();
+		counts.put("apples", 1);
+		counts.compute("apples", (key, value) -> value == null ? 1 : value + 1);
+		
+	Use atomic map methods such as compute, merge, or putIfAbsent when an update depends on the current value. A separate get() followed by put() is not atomic as a pair.
+	
+13. How JWT works in java ?
+	JWT (JSON Web Token) is a compact token an application can issue after authentication. A Java API can then verify the token on later requests instead of asking the user to log in again for each request.
+
+	A JWT has three Base64URL-encoded parts:
+		header.payload.signature
+		- Header: identifies the token type and signing algorithm.
+		- Payload: contains claims, such as a user ID and expiry time.
+		- Signature: lets the server detect whether the header or payload was changed.
+		
+	The payload is encoded, not encrypted. Don’t put passwords or other secrets in it.
+	
+	Typical flow
+	1. The client sends login credentials to the Java application.
+	2. The application verifies them and creates a signed JWT.
+	3. The client sends it on later requests:
+	   Authorization: Bearer <token>
+	4. A Java filter or security framework verifies the signature and expiry. If valid, it uses the claims to identify the user and authorize the request.
+		
+	In a real app, use a Java security framework such as Spring Security to validate the token in a request filter. Keep signing keys out of source control, use HTTPS, set reasonable expiry times, and handle invalid or expired tokens by returning 401 Unauthorized.
+	
+14. Difference between Kafka and RabbitMQ
+	KAFKA VS RABBITMQ
+
+	Both Kafka and RabbitMQ send messages between applications, but they use different models.
+	1. CORE MODEL
+		Kafka:
+		A persistent, partitioned event log.
+
+		RabbitMQ:
+		A message broker that routes messages to queues.
+	2. HOW MESSAGES ARE READ
+		Kafka:
+		Consumers track their position in a topic using offsets. Events are retained according to a configured retention policy, so consumers can reread them while they are still retained.
+
+		RabbitMQ:
+		Consumers receive messages from queues. After a message is acknowledged, it is normally removed from the queue.
+	3. MULTIPLE CONSUMERS
+		Kafka:
+		Different consumer groups can independently read the same topic.
+
+		RabbitMQ:
+		Exchanges route messages to one or more queues. Consumers read from those queues.
+	4. COMMON USE CASES
+		Kafka:
+		High-volume event streams, event replay, analytics, and sending the same stream to multiple systems.
+
+		RabbitMQ:
+		Task queues, work distribution, and flexible message routing.
+	5. ORDERING
+		Kafka:
+		Events are ordered within each topic partition.
+
+		RabbitMQ:
+		Messages are generally delivered in queue order, but multiple consumers and message redelivery can affect the order observed by consumers.
+
+	RULE OF THUMB
+		Choose Kafka when you need a durable event stream that multiple systems can read or replay.
+		Choose RabbitMQ when you need flexible routing and queues to distribute work among workers.
+		Both can support reliable systems. Delivery guarantees, ordering, and performance depend on configuration and how consumers handle failures.	
+
+
+
+15. Java MultiThreading questions:
+	1. THREAD POOLS AND EXECUTORS
+	   - How would you size a thread pool for CPU-bound work versus I/O-bound work?
+	   - What happens when a ThreadPoolExecutor’s work queue is full?
+	   - How do corePoolSize, maximumPoolSize, keepAliveTime, and the queue interact?
+	   - When would you use a bounded queue? How would you choose its capacity?
+	   - Which rejection policy would you use, and what are the trade-offs?
+	   - How do you diagnose a system where the executor has many queued tasks but few active workers?
+	   - How do you prevent one slow task from starving unrelated work?
+	   - When would you use separate executors for different workloads?
+	   - How do virtual threads change the way you design a thread-per-request application?
+	2. SYNCHRONIZATION AND LOCKING
+	   - Explain the Java Memory Model and the happens-before relationship.
+	   - What guarantees does volatile provide, and what does it not provide?
+	   - Why is count++ not thread-safe even when count is volatile?
+	   - When would you use synchronized, ReentrantLock, ReadWriteLock, or StampedLock?
+	   - How would you detect and prevent deadlocks?
+	   - What are lock contention, lock convoying, and priority inversion?
+	   - How can lock scope be reduced safely?
+	   - What are the risks of calling external code while holding a lock?
+	   - How would you implement a thread-safe singleton, and which approach would you choose?
+	3. CONCURRENT COLLECTIONS
+	   - How does ConcurrentHashMap support concurrent access?
+	   - When should you use ConcurrentHashMap.compute(), merge(), or putIfAbsent()?
+	   - Why is a separate get() followed by put() not an atomic operation?
+	   - What consistency guarantees do concurrent collections provide during iteration?
+	   - How would you implement a bounded, thread-safe LRU cache?
+	   - When would you choose BlockingQueue, ConcurrentLinkedQueue, or a custom queue?
+	   - How would you safely publish an object to other threads?
+	4. ASYNC PROGRAMMING AND COMPLETABLEFUTURE
+	   - How do thenApply(), thenCompose(), and thenCombine() differ?
+	   - How do you handle exceptions and timeouts in a CompletableFuture pipeline?
+	   - Which executor runs an async stage when none is specified?
+	   - How would you prevent blocking work from running on the common ForkJoinPool?
+	   - How do you cancel a task, and what does cancellation guarantee?
+	   - How would you limit concurrency when calling a downstream service asynchronously?
+	   - How do you propagate tracing, security context, or request context across async tasks?
+	5. PRODUCTION DIAGNOSIS
+	   - A service’s latency rises, CPU is low, and the thread pool is saturated. How do you investigate?
+	   - How would you distinguish threads waiting for work from threads blocked on a lock?
+	   - What do RUNNABLE, BLOCKED, WAITING, and TIMED_WAITING mean in a thread dump?
+	   - How do you use thread dumps, Java Flight Recorder, and VisualVM to investigate contention?
+	   - What metrics would you expose for executors and task queues?
+	   - How would you investigate high context switching or excessive thread creation?
+	   - How do you identify a thread leak?
+	   - What would you investigate if a thread dump shows many threads waiting in socket reads?
+	6. DESIGN AND FAILURE SCENARIOS
+	   - How would you design a bounded producer-consumer system with backpressure?
+	   - How do you prevent overload from propagating through multiple services?
+	   - How would you make task processing safe when a worker crashes halfway through?
+	   - How would you handle retries without causing duplicate side effects?
+	   - How do you preserve ordering while processing tasks concurrently?
+	   - How would you shut down an executor gracefully while still handling in-flight work?
+	   - How do you avoid lost updates when several threads modify shared state?
+	   - How would you design a rate limiter or semaphore-based concurrency limit?
+	   - How do you prevent a slow downstream dependency from exhausting all request threads?
+	7. CODING AND SYSTEM-DESIGN EXERCISES
+	   - Implement a bounded blocking queue using wait() and notifyAll().
+	   - Implement a thread-safe LRU cache and explain its locking strategy.
+	   - Write a task scheduler that supports cancellation and graceful shutdown.
+	   - Implement a rate limiter and compare token-bucket and semaphore approaches.
+	   - Design a service that processes millions of records with bounded memory and controlled concurrency.
+	   - Given a thread dump, identify the likely bottleneck and propose a fix.
+
+16. Java Collection questions
+	1. COLLECTIONS DESIGN AND TRADE-OFFS
+	   - How do you choose between ArrayList, LinkedList, ArrayDeque, and CopyOnWriteArrayList?
+	   - What are the time and memory trade-offs of HashMap, TreeMap, and LinkedHashMap?
+	   - When would you use a Set instead of a List?
+	   - How do collection interfaces differ from their implementations?
+	   - How do you choose a collection based on access patterns, ordering, concurrency, and memory use?
+	2. HASHMAP AND HASHING
+	   - Explain how HashMap stores and retrieves entries.
+	   - What happens when two keys have the same hash code?
+	   - Why must equal objects have equal hash codes?
+	   - What can go wrong if a key is mutated after being inserted into a HashMap?
+	   - How does HashMap resize, and what is the cost of resizing?
+	   - Why should you provide an initial capacity when the expected map size is known?
+	   - What are tree bins, and when can they be used?
+	   - How would you investigate poor HashMap performance in production?
+	   - When would you choose IdentityHashMap or WeakHashMap?
+	3. ITERATORS AND COLLECTION BEHAVIOR
+	   - What is the difference between fail-fast and weakly consistent iterators?
+	   - Is ConcurrentModificationException a thread-safety mechanism?
+	   - How do Iterator.remove() and Collection.remove() differ during iteration?
+	   - How do subList views behave if the original list is modified?
+	   - What does it mean for a collection to be backed by another collection?
+	   - How do equals() and hashCode() affect Set and Map behavior?
+	4. CONCURRENT COLLECTIONS
+	   - How does ConcurrentHashMap support concurrent reads and updates?
+	   - What atomicity guarantees do compute(), merge(), and putIfAbsent() provide?
+	   - Why is get() followed by put() not atomic?
+	   - How does CopyOnWriteArrayList handle reads and writes?
+	   - When would you use BlockingQueue, ConcurrentLinkedQueue, or a synchronized collection?
+	   - What iteration guarantees do concurrent collections provide?
+	   - How would you choose a concurrent collection for a high-read, low-write workload?
+	5. ORDERING AND SORTING
+	   - How do Comparable and Comparator differ?
+	   - What can happen if a Comparator is inconsistent with equals()?
+	   - How does TreeMap use its comparator to determine key equality?
+	   - How would you sort a map by its values?
+	   - How would you maintain a top-K list efficiently as new values arrive?
+	   - How do stable sorting and comparator transitivity matter in real systems?
+	6. IMMUTABILITY AND API DESIGN
+	   - What is the difference between an unmodifiable collection and an immutable collection?
+	   - How do List.of(), Collections.unmodifiableList(), and defensive copies differ?
+	   - How would you safely expose a collection from a mutable class?
+	   - What risks arise from using mutable objects as map keys?
+	   - How would you design a collection API that prevents callers from modifying internal state?
+	7. PERFORMANCE AND MEMORY
+	   - How would you estimate the memory usage of a large HashMap?
+	   - What causes excessive allocation when processing collections?
+	   - When should you use primitive collections or arrays instead of boxed collections?
+	   - How would you process a very large dataset without loading it all into memory?
+	   - What are the performance costs of repeated resizing?
+	   - How do you benchmark collection performance reliably?
+	8. PRODUCTION SCENARIOS
+	   - A HashMap lookup becomes slow as the application grows. How would you diagnose it?
+	   - A service has high memory usage from collections. How would you find the source?
+	   - A cache backed by a ConcurrentHashMap grows without limit. How would you control its size and expiration?
+	   - A collection is being modified while another thread iterates over it. What designs could solve this?
+	   - A batch job processes millions of records and runs out of memory. How would you redesign it?
+	   - A TreeSet unexpectedly drops values. What comparator or equality issues would you investigate?
+	9. CODING AND DESIGN EXERCISES
+	   - Implement an LRU cache using a HashMap and a doubly linked list.
+	   - Implement a bounded queue and explain its concurrency behavior.
+	   - Find the top K most frequent elements in a large input.
+	   - Remove duplicates while preserving insertion order.
+	   - Merge two sorted collections efficiently.
+	   - Design an in-memory cache with eviction, expiration, and thread-safe access.
+	   - Given a workload description, choose suitable collections and justify the choices.
+	   
+17. Java 8 to java 17 new feature list
+	JAVA 8
+		1. Lambda expressions
+		   Write concise implementations of functional interfaces.
+		2. Functional interfaces
+		   Interfaces with one abstract method, such as Runnable, Predicate, Function, and Consumer.
+		3. Stream API
+		   Process collections with operations such as filter, map, flatMap, and reduce.
+		4. Method references
+		   Refer to an existing method using syntax such as String::valueOf.
+		5. Optional
+		   Represent a value that may be absent and reduce some null checks.
+		6. Default and static methods in interfaces
+		   Add behavior to interfaces while supporting existing implementations.
+		7. New Date and Time API
+		   Use classes such as LocalDate, LocalDateTime, and ZonedDateTime.
+	JAVA 9
+		8. Collection factory methods
+		   Create unmodifiable collections with List.of(), Set.of(), and Map.of().
+		9. Module system
+		   Organize code into named modules with explicit dependencies and exports.
+		10. Private interface methods
+			Share implementation between interface default methods.
+	JAVA 10
+		11. Local variable type inference
+			Use var for local variables when the type is clear from the initializer.
+	JAVA 11
+		12. Standard HTTP Client
+			Use HttpClient for synchronous and asynchronous HTTP requests.
+		13. New String and Files methods
+			Examples include String.isBlank(), strip(), lines(), repeat(), and Files.readString().
+	JAVA 14
+		14. Switch expressions
+			Use switch as an expression that returns a value.
+		15. Helpful NullPointerException messages
+			Get more specific information about which expression was null.
+	JAVA 15
+		16. Text blocks
+			Write multiline string literals more readably.
+	JAVA 16
+		17. Records
+			Define concise data carrier classes. Records became a standard feature in Java 16.
+		18. Pattern matching for instanceof
+			Test a type and bind the matched value in one step.
+		19. Stream.toList()
+			Collect stream results into an unmodifiable list.
+	JAVA 17
+		20. Sealed classes
+			Restrict which classes or interfaces may extend or implement a type.
+		21. Strong encapsulation of JDK internals
+			Internal JDK APIs are more strongly restricted.
+	TOP FEATURES TO STUDY FIRST
+		- Lambda expressions and functional interfaces
+		- Streams, especially map(), flatMap(), reduce(), and collectors
+		- Optional and common pitfalls
+		- Default methods in interfaces
+		- Date and Time API
+		- var
+		- Records
+		- Pattern matching for instanceof
+		- Switch expressions
+		- Sealed classes
+
+18. Exception related interview questions
+	1. What is the difference between checked and unchecked exceptions?
+	2. What is the difference between Exception and Error?
+	3. What are try, catch, and finally used for?
+	4. Can a finally block fail to execute? When?
+	5. What happens if both the try block and finally block return a value?
+	6. Can we have a try block without a catch block?
+	7. Can one try block have multiple catch blocks? What order should they be in?
+	8. What happens if a parent exception is caught before its child exception?
+	9. What is the difference between throw and throws?
+	10. Can a method override another method and declare a broader checked exception?
+	11. What are the rules for exceptions in method overriding?
+	12. What is exception propagation?
+	13. How do you create a custom checked exception? How does it differ from a custom unchecked exception?
+	14. What is try-with-resources? How does AutoCloseable work with it?
+	15. What are suppressed exceptions in try-with-resources?
+	16. What is the difference between final, finally, and finalize()?
+	17. What is exception chaining? When would you use a cause?
+	18. What is the difference between getMessage() and getCause()?
+	19. What happens when an exception is thrown inside a catch or finally block?
+	20. How should exceptions be handled in a layered application?
+	21. When should you catch an exception, and when should you let it propagate?
+	22. Why is catching Exception or Throwable broadly often discouraged?
+	23. What is the danger of swallowing an exception?
+	24. How do you preserve the original exception when wrapping it in another exception?
+	25. How do exceptions affect transaction rollback in frameworks such as Spring?
+	26. How should REST APIs translate exceptions into HTTP responses?
+	27. How do you log exceptions without logging the same failure multiple times?
+	28. What is the difference between fail-fast validation and exception-based control flow?
+	29. How do checked exceptions interact with lambda expressions and streams?
+	30. How would you design retries for transient failures without retrying permanent failures?
+	31. How do you handle exceptions from CompletableFuture or asynchronous tasks?
+	32. How do you diagnose an exception that occurs only under production load?
+	33. What information should a useful exception message contain?
+	34. What is the performance cost of creating and throwing exceptions?
+	35. How do you avoid exposing sensitive information in exception messages or API responses?
+	PRACTICE SCENARIOS
+	- A finally block throws an exception while another exception is already being handled. Which exception reaches the caller?
+	- A method catches an exception, logs it, and continues. What risks does this create?
+	- A database call times out. How do you decide whether to retry?
+	- A stream lambda calls a method that throws a checked exception. How can you handle it cleanly?
+	- A service catches an exception and returns null. What problems might that cause?
+	- A transaction fails with a checked exception. Will it roll back automatically in your framework?
+	- Two resources are used in try-with-resources, and both fail to close. How are the exceptions reported?
+	For senior-level interviews, explain the decision behind the handling strategy: whether to recover, retry, wrap, translate, or propagate the exception.
+
+19. String related interview questions
+	1. Why are String objects immutable in Java?
+	2. What is the String Constant Pool?
+	3. What is the difference between:
+	   String a = "hello";
+	   String b = new String("hello");
+	4. What is the difference between == and equals() when comparing strings?
+	5. What does the intern() method do?
+	6. How does Java calculate a string’s hash code?
+	7. Why is String commonly used as a HashMap key?
+	8. What is the difference between String, StringBuilder, and StringBuffer?
+	9. Is StringBuffer thread-safe? What does that mean?
+	10. Why can repeated string concatenation in a loop be inefficient?
+	11. How does the compiler handle string concatenation?
+	12. What are text blocks, and when would you use them?
+	13. What is the difference between isEmpty() and isBlank()?
+	14. What is the difference between trim() and strip()?
+	15. How do substring() and subSequence() differ?
+	16. How would you reverse a string in Java?
+	17. How would you check whether a string is a palindrome?
+	18. How would you find the first non-repeated character in a string?
+	19. How would you count the frequency of each character?
+	20. How would you check whether two strings are anagrams?
+	21. How do you remove duplicate characters while preserving their order?
+	22. How would you find the longest substring without repeating characters?
+	23. How do you split a string while preserving trailing empty values?
+	24. How would you compare strings without considering case?
+	25. What issues can arise when comparing strings with different locales?
+	26. How do regular expressions work with String.matches() and Pattern?
+	27. Why should passwords or secrets generally not be stored as String?
+	28. What is the difference between UTF-16 code units, Unicode code points, and user-perceived characters?
+	29. How would you safely build a string from many pieces of data?
+	30. How would you avoid exposing sensitive data when logging strings?
+	For senior-level interviews, be ready to discuss immutability, pooling, Unicode, performance, and security—not just string manipulation problems.
+	
+20. JVM and Memory related interview questions:
+	1. What are the main components of the JVM?
+	2. What is the difference between the JDK, JRE, and JVM?
+	3. What are the main runtime memory areas in Java?
+	4. What is stored in the heap?
+	5. What is stored in a thread’s stack?
+	6. What is the difference between heap memory and stack memory?
+	7. Where are class metadata and static fields stored in modern Java?
+	8. What is the difference between PermGen and Metaspace?
+	9. What causes a StackOverflowError?
+	10. What causes an OutOfMemoryError?
+	11. How does garbage collection work at a high level?
+	12. What are the young generation and old generation?
+	13. What are minor, major, and full garbage collections?
+	14. What are GC roots?
+	15. What are strong, soft, weak, and phantom references?
+	16. Can System.gc() guarantee that garbage collection will run?
+	17. What are stop-the-world pauses?
+	18. How do throughput, latency, and memory footprint affect garbage collector choice?
+	19. What are the differences between G1, ZGC, and Shenandoah?
+	20. What is a memory leak in Java, even though Java has garbage collection?
+	21. How would you investigate steadily increasing heap usage in production?
+	22. How do you take and analyze a heap dump?
+	23. What can a dominator tree and retained size show?
+	24. How would you distinguish a memory leak from temporary high memory usage?
+	25. What is the difference between heap memory and native memory?
+	26. What can cause native memory usage to grow while heap usage stays stable?
+	27. What are direct byte buffers, and how do they use memory?
+	28. What is class loading?
+	29. What are the bootstrap, platform, and application class loaders?
+	30. What is class-loader delegation, and why does Java use it?
+	31. What can cause a class-loader memory leak?
+	32. What is JIT compilation?
+	33. What is the difference between interpreted and compiled execution?
+	34. What is escape analysis?
+	35. What is the difference between -Xms and -Xmx?
+	36. How would you choose heap settings for a production service?
+	37. Which JVM metrics would you monitor in production?
+	38. How would you investigate frequent or long GC pauses?
+	39. Which tools would you use to diagnose JVM memory and GC issues?
+	40. How do Java Flight Recorder and Java Mission Control help diagnose performance problems?
+	41. What information can GC logs provide?
+	42. How would you investigate OutOfMemoryError: Java heap space?
+	43. How would you investigate OutOfMemoryError: Metaspace?
+	44. How would you investigate OutOfMemoryError: Direct buffer memory?
+	45. How does object allocation rate affect garbage collection?
+	46. What is object pooling, and when can it make performance or memory usage worse?
+	47. How can large temporary objects affect garbage collection?
+	48. What is the difference between shallow size and retained size?
+	49. How do finalize(), Cleaner, and try-with-resources differ?
+	50. Application response time rises after deployment, but heap usage looks normal. What JVM-level issues would you investigate?
+	
+21. SOLID principles in Java.
+
+	SOLID is a set of five principles for designing maintainable, flexible object-oriented software.
+
+	S - SINGLE RESPONSIBILITY PRINCIPLE
+	A class should have one main responsibility and one main reason to change.
+	Example: Keep invoice calculations separate from saving invoices to a database.
+
+	O - OPEN/CLOSED PRINCIPLE
+	Software entities should be open for extension but closed for modification.
+	Example: Add a new payment type by implementing a PaymentMethod interface rather than changing existing payment logic.
+
+	L - LISKOV SUBSTITUTION PRINCIPLE
+	A subtype should be usable wherever its parent type is expected without breaking correct behavior.
+	Example: Any implementation of a Bird interface should honor the behaviors promised by that interface. If some birds cannot fly, flying should not be required by the general Bird type.
+
+	I - INTERFACE SEGREGATION PRINCIPLE
+	Clients should not be forced to depend on methods they do not use.
+	Example: Prefer separate Printable and Faxable interfaces over one large interface that requires every device to implement both.
+
+	D - DEPENDENCY INVERSION PRINCIPLE
+	High-level code should depend on abstractions rather than concrete low-level implementations.
+	Example: A service should depend on a PaymentProcessor interface, which can be implemented by different payment providers.
+
+	
+	INTERVIEW SUMMARY
+	SRP: One main responsibility per class.
+	OCP: Extend behavior without changing stable existing code.
+	LSP: Subtypes should honor the behavior of their parent types.
+	ISP: Prefer small, focused interfaces.
+	DIP: Depend on abstractions, not concrete implementations.
