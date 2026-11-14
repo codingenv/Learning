@@ -416,33 +416,250 @@
 
 15. Java MultiThreading questions:
 	1. THREAD POOLS AND EXECUTORS
-	   - How would you size a thread pool for CPU-bound work versus I/O-bound work?
-	   - What happens when a ThreadPoolExecutor’s work queue is full?
-	   - How do corePoolSize, maximumPoolSize, keepAliveTime, and the queue interact?
-	   - When would you use a bounded queue? How would you choose its capacity?
-	   - Which rejection policy would you use, and what are the trade-offs?
-	   - How do you diagnose a system where the executor has many queued tasks but few active workers?
-	   - How do you prevent one slow task from starving unrelated work?
-	   - When would you use separate executors for different workloads?
-	   - How do virtual threads change the way you design a thread-per-request application?
+	   A. How would you size a thread pool for CPU-bound work versus I/O-bound work?
+			CPU-bound tasks spend most of their time using the processor. Too many threads cause extra context switching without increasing throughput.
+
+			A common starting point is: Thread pool size = number of available CPU cores
+			Sometimes use cores + 1 to allow another thread to run when one is briefly blocked. Measure under realistic load to choose the final size.
+
+			In Java:
+				int cores = Runtime.getRuntime().availableProcessors();
+				ExecutorService pool = Executors.newFixedThreadPool(cores);
+		
+			IO-BOUND WORK
+
+				I/O-bound tasks spend much of their time waiting for databases, network calls, or files. While one thread waits, another can use the CPU, so the pool can be larger than the number of cores.
+
+				A rough starting formula is:
+				Threads = CPU cores × (1 + wait time / compute time)
+				For example, with 8 cores and tasks that spend about 4 times as long waiting as computing:
+				Threads = 8 × (1 + 4) = 40
+				Treat this as a starting estimate, not a fixed rule. Measure throughput and latency, and account for limits such as database connections, downstream service capacity, memory, and queue size.
+
+				PRACTICAL GUIDELINES
+				- Use separate pools for workloads with different behavior, such as CPU-heavy processing and database calls.
+				- Use bounded queues so overload does not build an unbounded backlog.
+				- Monitor active threads, queue length, task wait time, execution time, rejections, CPU, and downstream connection usage.
+				- Tune with load tests that reflect production traffic.
+				- For Java 21 and later, virtual threads can simplify handling many blocking tasks, but they do not increase CPU capacity or remove database and service limits.
+	   
+	   B. What happens when a ThreadPoolExecutor’s work queue is full?
+			When the queue is full, ThreadPoolExecutor tries to create another worker up to maximumPoolSize.
+			If it cannot create one, the task is rejected.
+			The configured RejectedExecutionHandler decides what happens: throw, run in the caller, discard, or discard an older queued task.
+			Choose a policy carefully; rejection can signal that the system is overloaded
+	   
+	   C. How do corePoolSize, maximumPoolSize, keepAliveTime, and the queue interact?
+			ThreadPoolExecutor handles a new task in this order:
+			1. If running threads are fewer than corePoolSize, it starts a new thread.
+			2. Otherwise, it queues the task if the queue has space.
+			3. If the queue is full, it starts threads up to maximumPoolSize.
+			4. If the queue is full and the pool is at maximum size, it rejects the task.
+			5. keepAliveTime controls how long excess threads (above corePoolSize) wait when idle before being removed.
+			
+			Example: corePoolSize = 2, maximumPoolSize = 4, queue capacity = 2.
+			- Tasks 1 and 2 start two threads.
+			- Tasks 3 and 4 wait in the queue.
+			- Task 5 starts a third thread; task 6 starts a fourth.
+			- Task 7 is rejected because the queue and pool are full.
+			- When the pool is quiet, the extra threads above 2 are removed after keepAliveTime.
+			
+			ThreadPoolExecutor executor = new ThreadPoolExecutor(
+					2,                      // corePoolSize
+					4,                      // maximumPoolSize
+					30, TimeUnit.SECONDS,   // keepAliveTime
+					new ArrayBlockingQueue<>(2),
+					new ThreadPoolExecutor.AbortPolicy()
+			);
+			
+	   D. When would you use a bounded queue? How would you choose its capacity?
+			Use a bounded queue to cap how many tasks can wait, preventing a traffic spike or slow workers from causing unbounded memory growth and increasing latency.
+			Choose its capacity based on load testing, acceptable wait time, task memory usage, and downstream limits such as database connections. A larger queue absorbs short bursts but can increase waiting time; a smaller queue applies backpressure sooner through rejection or caller-runs behavior.
+			Monitor queue length, task wait time, rejections, and worker utilization, then tune the capacity against your latency and throughput goals.
+	   
+	   E. Which rejection policy would you use, and what are the trade-offs?
+			ThreadPoolExecutor provides four built-in rejection policies:
+			1. AbortPolicy: Throws RejectedExecutionException. Use when the caller should know the task was rejected. The caller must handle the exception.
+			2. CallerRunsPolicy: Runs the task on the submitting thread. This slows task submission and applies backpressure, but can make request threads slow or block.
+			3. DiscardPolicy: Silently drops the task. Use only when losing the task is acceptable.
+			4. DiscardOldestPolicy: Drops the oldest queued task, then retries submission. This can lose important work and change task order.
+			For important tasks, I’d usually start with AbortPolicy and handle rejection explicitly, for example by returning an overload response or retrying safely. Use CallerRunsPolicy when slowing producers is an acceptable way to apply backpressure.
+
+	   F. How do you diagnose a system where the executor has many queued tasks but few active workers?
+			Check the worker threads’ thread dump and state to see what they’re doing. Few active workers with a growing queue may mean tasks are blocked, waiting on a lock or I/O, or the pool is undersized.
+			Compare task arrival rate with completion rate, and inspect task duration, queue wait time, executor configuration, and downstream limits such as database connections. Use thread dumps, metrics, and profiling to locate the bottleneck before increasing the pool size.
+	   
+	   G. How do you prevent one slow task from starving unrelated work?
+			Use separate thread pools or executors for workloads with different latency and resource needs, so slow tasks cannot fill the queue used by fast tasks. Set timeouts and cancellation for tasks that can hang, and use bounded queues with an appropriate rejection or backpressure policy. Monitor queue wait times and task durations to catch starvation early.
+			
+	   H. When would you use separate executors for different workloads?
+			Use separate executors when workloads have different resource needs or can block one another—for example, CPU-heavy processing, database calls, and slow external API requests. This prevents a saturated or slow workload from consuming all threads and queue space needed by another.
+			Give each executor an appropriate pool size, bounded queue, timeout, and rejection policy. Also respect shared limits, such as database connection counts; separate pools isolate workloads but do not create more downstream capacity.
+	   
+	   J. How do virtual threads change the way you design a thread-per-request application?
+			Virtual threads make it practical to use one thread per request, even when requests spend much of their time waiting on blocking I/O. This can simplify code compared with callback-based or reactive designs.
+			Create a virtual thread per task instead of sizing a large platform-thread pool. Virtual threads do not make CPU-bound work faster, and they do not increase database or downstream-service capacity, so use connection pools, timeouts, and concurrency limits where needed.
+			Avoid using thread pools just to limit virtual-thread count; use a semaphore or other resource-specific limit. Be cautious with ThreadLocal state and blocking while holding locks, and check your Java version’s guidance on virtual-thread pinning.
+	   F. How virtual threads works in java and why it fast?
+			A virtual thread is a lightweight Java thread managed by the JVM rather than being tied to one operating-system thread for its entire lifetime.
+
+			How it works:
+			1. The JVM runs a virtual thread on an OS-backed platform thread, called a carrier.
+			2. When the virtual thread reaches a supported blocking operation, such as waiting for I/O, the JVM can suspend it and free the carrier to run another virtual thread.
+			3. When the I/O is ready, the JVM schedules the virtual thread to continue, possibly on a different carrier.
+			This helps with applications that handle many concurrent requests that spend much of their time waiting. The JVM can manage many virtual threads using a much smaller number of carrier threads, with less per-thread overhead than creating a platform thread for every request. Oracle’s Java 21 virtual-thread guide
+
+			Important: Virtual threads are not faster at executing code. They improve scalability and throughput for I/O-heavy work; they do not make CPU-heavy work run faster or increase the capacity of a database or remote service. Java 21 API documentation
+
+			Example (Java 21+):
+			try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+				executor.submit(() -> callDatabase());
+				executor.submit(() -> callRemoteService());
+			}
+			The JVM starts a virtual thread for each task. For limited resources such as database connections, still use a connection pool or another concurrency limit.
+	
 	2. SYNCHRONIZATION AND LOCKING
-	   - Explain the Java Memory Model and the happens-before relationship.
-	   - What guarantees does volatile provide, and what does it not provide?
-	   - Why is count++ not thread-safe even when count is volatile?
-	   - When would you use synchronized, ReentrantLock, ReadWriteLock, or StampedLock?
-	   - How would you detect and prevent deadlocks?
-	   - What are lock contention, lock convoying, and priority inversion?
-	   - How can lock scope be reduced safely?
-	   - What are the risks of calling external code while holding a lock?
-	   - How would you implement a thread-safe singleton, and which approach would you choose?
+	   A. Explain the Java Memory Model and the happens-before relationship.
+			The Java Memory Model (JMM) defines how threads interact through shared memory. It specifies when a thread’s writes become visible to other threads and which instruction reorderings are allowed. It gives Java’s concurrency rules; it is not simply a description of where data physically lives.
+
+			A happens-before relationship means one action is guaranteed to be visible and ordered before another action. If there is no such relationship between conflicting access to shared data, the program has a data race, and another thread may see stale or unexpected values.
+
+			Common happens-before rules:
+			- Program order: Actions in a single thread happen-before later actions in that thread.
+			- Monitor lock: Releasing a synchronized lock happens-before another thread subsequently acquires that same lock.
+			- Volatile: Writing a volatile variable happens-before another thread subsequently reads that variable.
+			- Thread start: Actions before thread.start() happen-before actions in the started thread.
+			- Thread join: Actions in a thread happen-before another thread successfully returns from join() on it.
+			- Transitivity: If A happens-before B, and B happens-before C, then A happens-before C.
+			Example using volatile:
+			class Example {
+				private int value;
+				private volatile boolean ready;
+
+				void writer() {
+					value = 42;
+					ready = true;
+				}
+
+				void reader() {
+					if (ready) {
+						System.out.println(value); // Guaranteed to see 42
+					}
+				}
+			}
+			When the reader sees ready == true, the volatile write/read relationship makes the earlier value = 42 write visible too.
+
+			Interview summary: The JMM defines visibility and ordering rules. Happens-before is the guarantee that makes one thread’s writes visible to another; synchronized, volatile, start(), and join() establish such guarantees.
+	   
+	   B. What guarantees does volatile provide, and what does it not provide?
+			Volatile provides visibility and ordering guarantees for a variable shared between threads.
+			- A write to a volatile variable becomes visible to threads that subsequently read that variable.
+			- It prevents certain reordering across the volatile read or write, so actions before a volatile write are visible after another thread reads that value.
+			volatile does not make compound operations atomic. For example, count++ is a read, increment, and write, so concurrent increments can be lost even if count is volatile.
+
+			Use volatile for simple state flags or values when one thread writes and others read. Use synchronized, a lock, or an atomic class such as AtomicInteger when you need atomic updates. Java Language Specification: happens-before
+	   
+	   C. Why is count++ not thread-safe even when count is volatile?
+			count++ is a read–modify–write operation, not one atomic action. Two threads can both read the same value, increment it, and write back the same result, losing one increment. volatile makes each read and write visible, but does not make the whole sequence atomic.
+
+			Use AtomicInteger for atomic increments:	
+				AtomicInteger count = new AtomicInteger();
+				count.incrementAndGet();
+	   
+	   D. When would you use synchronized, ReentrantLock, ReadWriteLock, or StampedLock?
+			Use synchronized by default for simple mutual exclusion. Choose a more specialized lock when you need a feature it provides.
+			- synchronized: Protect a short critical section with one exclusive lock. Java acquires and releases it automatically, including when an exception occurs. It’s usually the clearest option. Oracle synchronization guide
+			- ReentrantLock: Use when you need capabilities such as timed or interruptible lock acquisition, tryLock(), fairness options, or multiple Condition variables. Always release it in a finally block.
+			- ReadWriteLock: Use when reads are frequent, writes are relatively rare, and concurrent reads can safely proceed together. Writes still require exclusive access; measure first, since the extra coordination may not help every workload.
+			- StampedLock: Consider for specialized, read-heavy code where optimistic reads may reduce contention. It is more complex and not reentrant, so use it only when you can validate optimistic reads correctly. Java 21 StampedLock API
+			Rule of thumb: start with synchronized; switch when you have a specific requirement or measured contention that another lock addresses.
+	   
+	   E. How would you detect and prevent deadlocks?
+			DETECTING DEADLOCKS
+			- Take a thread dump using VisualVM, jstack, or Java Flight Recorder.
+			- Look for threads in BLOCKED state, each waiting for a lock held by another thread.
+			- A deadlock report often shows a circular chain: Thread A holds Lock 1 and waits for Lock 2, while Thread B holds Lock 2 and waits for Lock 1.
+			- Monitor lock contention and blocked-thread counts in production.
+			PREVENTING DEADLOCKS
+			- Acquire multiple locks in a consistent global order in every code path.
+			- Keep synchronized sections short; avoid network calls or callbacks while holding locks.
+			- Use tryLock() with a timeout when appropriate, and handle failure safely.
+			- Avoid nested locks where possible.
+			- Review lock ownership and release behavior carefully.
+			Java’s ThreadMXBean.findDeadlockedThreads() can also detect cycles involving monitor and ownable synchronizers. A thread dump helps identify which locks and code paths are involved.
+	   
+	   F. What are lock contention, lock convoying, and priority inversion?
+			LOCK CONTENTION
+			Multiple threads try to acquire the same lock. Only one can hold it, so the others wait. This can reduce throughput and increase latency.
+
+			LOCK CONVOYING
+			A group of threads repeatedly waits for the same lock. When the lock is released, threads take turns acquiring it, creating a queue and limiting progress. Scheduling overhead can make this worse.
+
+			PRIORITY INVERSION
+			A high-priority thread waits for a lock held by a low-priority thread. A medium-priority thread can keep the low-priority thread from running, indirectly delaying the high-priority thread.
+
+			In practice, reduce contention by keeping critical sections short, avoiding unnecessary shared state, and measuring lock waits before changing the locking strategy.
+	   
+	   G. How can lock scope be reduced safely?
+			Reduce lock scope by locking only the shared state that must be protected, and keeping unrelated work outside the critical section.
+			1. Identify the shared data and the invariant that must stay consistent.
+			2. Do independent or slow work, such as I/O or calculations, before acquiring the lock.
+			3. Lock, check the current state, and make the smallest required update.
+			4. Unlock, then do follow-up work outside the lock.
+			Be careful not to move a check outside the lock if another thread could change the data before the update. Keep related reads and writes under the same lock when they must be atomic together.
+	   
+	   H. What are the risks of calling external code while holding a lock?
+			Calling external code while holding a lock can:
+			- Cause deadlocks if that code tries to acquire another lock.
+			- Hold the lock for an unpredictable time, blocking other threads.
+			- Trigger callbacks that re-enter your code and create unexpected behavior.
+			- Increase latency or cause a thread-pool bottleneck if the call performs slow I/O.
+			Keep the critical section limited to the shared-state update. If you need to call external code, capture the required data under the lock, release it, then make the call. Ensure the state remains valid if another thread changes it in between.
+	   
 	3. CONCURRENT COLLECTIONS
-	   - How does ConcurrentHashMap support concurrent access?
-	   - When should you use ConcurrentHashMap.compute(), merge(), or putIfAbsent()?
-	   - Why is a separate get() followed by put() not an atomic operation?
-	   - What consistency guarantees do concurrent collections provide during iteration?
-	   - How would you implement a bounded, thread-safe LRU cache?
-	   - When would you choose BlockingQueue, ConcurrentLinkedQueue, or a custom queue?
-	   - How would you safely publish an object to other threads?
+	   A. When should you use ConcurrentHashMap.compute(), merge(), or putIfAbsent()?
+			Use these methods when the update depends on whether a key already has a value. Each performs the operation atomically for that key in a ConcurrentHashMap.
+
+		putIfAbsent(key, value)
+		Use when you want to add a value only if the key is not already present.
+			map.putIfAbsent("A", 1);
+		compute(key, function): Use when the new value depends on the key and its current value. Return null from the function to remove the mapping.
+			map.compute("A", (key, oldValue) -> oldValue == null ? 1 : oldValue + 1);
+		merge(key, value, function): Use when you have a value to add or combine with the current value. If the key is absent, the supplied value is inserted; otherwise, the function combines the old and supplied values.
+			map.merge("A", 1, Integer::sum);
+		Keep the functions short and avoid blocking or updating other mappings in the same map from inside them.
+			  
+	   
+	   B. What consistency guarantees do concurrent collections provide during iteration?
+			- Concurrent collections generally allow iteration while other threads update them, without throwing ConcurrentModificationException. The exact guarantee depends on the collection:
+			- ConcurrentHashMap iterators are weakly consistent. They can reflect some updates made during iteration, but they do not provide a single, atomic snapshot of the map.
+			- CopyOnWriteArrayList iterators use a snapshot of the array taken when the iterator is created. They don’t see later changes.
+			- Synchronized collections still require you to synchronize on the collection while iterating to prevent concurrent modification during the traversal.
+			So, safe iteration does not necessarily mean the iterator sees one consistent point-in-time view. Check the specific collection’s contract when that matters.
+	   
+	   C. How would you implement a bounded, thread-safe LRU cache?
+	   
+	   D. When would you choose BlockingQueue, ConcurrentLinkedQueue, or a custom queue?
+			BlockingQueue
+			Choose it for producer-consumer workflows where consumers should wait when the queue is empty, or producers should wait when a bounded queue is full. It also provides built-in coordination methods such as put(), take(), and timed offer() or poll(). Examples include ArrayBlockingQueue and LinkedBlockingQueue.
+
+			ConcurrentLinkedQueue
+			Choose it for a thread-safe, non-blocking FIFO queue when producers and consumers should not wait inside queue operations. It is unbounded, so control growth elsewhere if producers can outpace consumers.
+
+			Custom queue
+			Choose one only when standard queues cannot meet a specific requirement, such as specialized ordering or coordination. Custom concurrent queues are difficult to implement correctly; first check whether an existing queue can be composed with other concurrency tools.
+	   
+	   E. How would you safely publish an object to other threads?
+			Safe publication means making a fully initialized object visible to other threads through a mechanism that establishes a happens-before relationship.
+
+			Common approaches:
+				- Store it in a volatile field.
+				- Assign it while holding a lock, then have readers access it under the same lock.
+				- Store it in a thread-safe collection, such as ConcurrentHashMap.
+				- Publish it through a properly initialized static field.
+				- Start a thread after constructing the object; actions before Thread.start() are visible to that thread.
+			Also, avoid letting this escape from the constructor before initialization is complete. If the object is immutable and its fields are final, that helps, but the reference still needs to be published through a safe mechanism.
+	
 	4. ASYNC PROGRAMMING AND COMPLETABLEFUTURE
 	   - How do thenApply(), thenCompose(), and thenCombine() differ?
 	   - How do you handle exceptions and timeouts in a CompletableFuture pipeline?
@@ -451,6 +668,7 @@
 	   - How do you cancel a task, and what does cancellation guarantee?
 	   - How would you limit concurrency when calling a downstream service asynchronously?
 	   - How do you propagate tracing, security context, or request context across async tasks?
+	
 	5. PRODUCTION DIAGNOSIS
 	   - A service’s latency rises, CPU is low, and the thread pool is saturated. How do you investigate?
 	   - How would you distinguish threads waiting for work from threads blocked on a lock?
@@ -460,6 +678,7 @@
 	   - How would you investigate high context switching or excessive thread creation?
 	   - How do you identify a thread leak?
 	   - What would you investigate if a thread dump shows many threads waiting in socket reads?
+	
 	6. DESIGN AND FAILURE SCENARIOS
 	   - How would you design a bounded producer-consumer system with backpressure?
 	   - How do you prevent overload from propagating through multiple services?
@@ -470,6 +689,7 @@
 	   - How do you avoid lost updates when several threads modify shared state?
 	   - How would you design a rate limiter or semaphore-based concurrency limit?
 	   - How do you prevent a slow downstream dependency from exhausting all request threads?
+	
 	7. CODING AND SYSTEM-DESIGN EXERCISES
 	   - Implement a bounded blocking queue using wait() and notifyAll().
 	   - Implement a thread-safe LRU cache and explain its locking strategy.
