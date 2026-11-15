@@ -671,12 +671,59 @@
 	
 	5. PRODUCTION DIAGNOSIS
 	   - A service’s latency rises, CPU is low, and the thread pool is saturated. How do you investigate?
+			Low CPU with a saturated pool often means workers are waiting on I/O, locks, or another limited resource. I would:
+			1. Check executor metrics: active threads, pool size, queue depth, rejected tasks, task wait time, and task execution time.
+			2. Take several thread dumps during the slowdown. Look for common stacks showing waits on database connections, network calls, locks, or semaphores.
+			3. Use JFR to measure time spent blocked or waiting and identify the code paths involved.
+			4. Check downstream services and resource pools, especially database connection usage, wait time, timeouts, and response latency.
+			5. Fix the bottleneck—such as adding appropriate timeouts, reducing lock scope, or tuning a constrained connection pool. Avoid simply increasing the thread count until you know what workers are waiting for; that can push more load onto the bottleneck.
 	   - How would you distinguish threads waiting for work from threads blocked on a lock?
+			- Check the thread’s state and stack trace in a thread dump:
+			- Waiting for work: A pool worker is often WAITING or TIMED_WAITING inside a task-queue method such as BlockingQueue.take() or LockSupport.park(). This is usually normal when the pool has no tasks.
+			- Blocked on a lock: The thread is BLOCKED trying to enter a synchronized section, or parked while acquiring an explicit lock. The stack trace and lock information can show which lock it needs and, sometimes, which thread owns it.
+			Take two dumps a few seconds apart. If workers remain parked on an empty queue, they are likely idle. If many threads repeatedly wait for the same lock while work is queued, investigate lock contention. Check the executor’s active count and queue size too; thread state alone may not tell the whole story.
 	   - What do RUNNABLE, BLOCKED, WAITING, and TIMED_WAITING mean in a thread dump?
+	   
 	   - How do you use thread dumps, Java Flight Recorder, and VisualVM to investigate contention?
+			Use the tools together: thread dumps show where threads are waiting, JFR shows how often and how long contention happens, and VisualVM helps you inspect thread activity live.
+
+			THREAD DUMPS
+			1. Capture a dump during the slowdown. With JDK tools, run jcmd <pid> Thread.print -l.
+			2. Capture another dump a few seconds later.
+			3. Look for many threads in BLOCKED state, repeated stack traces, and which thread owns the lock they need. Repeated dumps help distinguish a persistent bottleneck from a brief wait. Oracle jcmd documentation
+			JAVA FLIGHT RECORDER
+			Record while the problem is occurring:
+
+			jcmd <pid> JFR.start name=contention settings=profile duration=2m filename=contention.jfr
+
+			Open contention.jfr in Java Mission Control. Inspect monitor-wait and thread-park events, their durations, and stack traces to find the code paths and locks causing the most waiting. JFR provides timing information that a thread-dump snapshot alone cannot. Oracle JFR troubleshooting guide
+
+			VISUALVM
+			Open the application and select its Threads tab. Watch the thread timeline and states during the slowdown, then take thread dumps from the tab. Threads repeatedly blocked or waiting in the same code path are candidates for investigation. VisualVM Threads documentation
+
+			After identifying the hot lock or code path, reduce the time spent holding the lock, avoid slow external calls inside the critical section, or consider a different synchronization strategy. Recheck under representative load to confirm the contention improved.
+	   
 	   - What metrics would you expose for executors and task queues?
+	   
 	   - How would you investigate high context switching or excessive thread creation?
+			1. Measure thread count, thread creation rate, CPU use, context switches, and executor queue metrics over time. Compare against a normal workload baseline.
+			2. Use Java Flight Recorder or VisualVM to inspect thread activity, creation, blocking, and CPU usage. Take thread dumps at intervals to see whether many threads are runnable, blocked, or repeatedly created.
+			3. Check OS-level metrics to confirm context switching is high and identify which process is responsible.
+			4. Find the cause: oversized pools, creating threads per task, blocked workers causing replacement threads, lock contention, or tasks that take too long.
+			5. Fix the cause: reuse appropriately sized executors, bound queues, apply backpressure, and separate workloads when needed. Then load-test and compare the metrics.
+	   
 	   - How do you identify a thread leak?
+			Thread leak occurs when threads keep being created or retained after their work is finished, causing the thread count to grow over time.
+
+			To investigate:
+			1. Track live thread count over time using JMX, monitoring, or Java Flight Recorder.
+			2. Capture thread dumps at intervals and compare thread names, creation points, and stack traces.
+			3. Look for growing groups of threads stuck in the same state, such as WAITING, BLOCKED, or RUNNABLE.
+			4. Check whether executors are shut down and whether tasks or libraries are creating unmanaged threads.
+			5. Review thread-pool metrics. A stable pool with idle workers is usually normal; a steadily growing number of threads is more suspicious.
+			Thread count alone isn’t proof of a leak. Confirm that the threads are accumulating and identify why they remain alive.
+
+				  
 	   - What would you investigate if a thread dump shows many threads waiting in socket reads?
 	
 	6. DESIGN AND FAILURE SCENARIOS
@@ -961,8 +1008,111 @@
 	48. What is the difference between shallow size and retained size?
 	49. How do finalize(), Cleaner, and try-with-resources differ?
 	50. Application response time rises after deployment, but heap usage looks normal. What JVM-level issues would you investigate?
+
+
+21. Explain Java memory model. How java memory works?
+	Let’s start with the JVM’s main memory areas. A useful first distinction is that some memory belongs to the whole JVM process, while each thread has its own stack.
+		JVM process
+		|
+		|-- Heap                         Shared by threads
+		|   `-- Objects and arrays
+		|
+		|-- Metaspace                    Shared by threads
+		|   `-- Class metadata
+		|
+		|-- Thread 1 stack               Private to thread 1
+		|   `-- Method calls and local variables
+		|
+		|-- Thread 2 stack               Private to thread 2
+			`-- Method calls and local variables
+	1. HEAP
+		When your code creates an object, such as new Employee(), the object is generally allocated on the heap. Multiple threads can access the same object if they have references to it.
+		The garbage collector reclaims heap objects when they are no longer reachable from places such as active thread stacks or static fields.
+
+	2. THREAD STACKS
+		Every thread has its own stack. Each method call adds a frame containing that call’s local variables and other information. When the method returns, its frame is removed.
+		void showEmployee() {
+			Employee employee = new Employee();
+		}
+		The local variable employee is in the method’s stack frame. It holds a reference to the Employee object, which is generally on the heap. When the method returns, that local reference disappears. The object can be garbage-collected if no other references to it remain.
+	3. METASPACE
+		Metaspace holds information about loaded classes, such as class structure and method metadata. It is separate from the Java heap and uses native memory.
+	4. WHAT HAPPENS WHEN MEMORY RUNS LOW?
+		The JVM’s garbage collector identifies objects that are no longer reachable and reclaims their heap memory. If the JVM cannot allocate memory even after attempting reclamation, it may throw an OutOfMemoryError. Deep or excessive method calls can exhaust a thread’s stack and cause a StackOverflowError.
+		This describes the main memory areas. Next, we can trace what happens in memory when Java executes a line like Employee e = new Employee().
+
+	Node: PermGen (Permanent Generation) was a JVM memory area used in Java 7 and earlier for class metadata and related data.
+		It was removed in Java 8 and replaced by Metaspace, which stores class metadata in native memory rather than in the Java heap.
+		So, for Java 8 and later, you won’t find a PermGen area. Older JVM errors may mention OutOfMemoryError: PermGen space; newer ones may report OutOfMemoryError: Metaspace.
+
+
+22. How garbage collector works in Java?
+	For an experienced Java developer, it helps to separate GC algorithms from GC policy:
+	- Algorithm: How the collector finds garbage and reclaims memory.
+	- Policy: When it runs, how much heap it targets, and how it balances pause time, throughput, and memory use.
 	
-21. SOLID principles in Java.
+	1. Allocation and reachability
+	Object allocation is usually cheap. The JVM often allocates small objects in a thread-local allocation buffer (TLAB), which lets a thread reserve space with little coordination.
+
+	When the heap needs space, the collector identifies GC roots—references held by active thread stacks, static fields, and JVM internals—and follows references from them. Objects it can reach are live for that collection. Unreachable objects are eligible for reclamation.
+
+	Eligibility does not mean the object is collected immediately. GC timing and reclamation strategy belong to the chosen collector.
+	
+	2. Why generational collection is common
+	Many applications create lots of short-lived objects. Collectors can use the generational hypothesis: most objects die young.
+
+	A generational collector commonly has:
+	- Young space: New objects are allocated here. A young collection reclaims dead objects; survivors may be copied or promoted to older space.
+	- Old space: Holds objects that have survived longer. It is collected less often because finding and handling long-lived objects can take more work.
+
+	Generational collection is common, but it is not universal across all collectors or Java releases. Oracle Java 17 GC implementation guide
+
+	3. Core reclamation algorithms
+	The main techniques are:
+	- Mark and sweep: Mark reachable objects, then reclaim unmarked space. This can leave fragmented free space.
+	- Mark and compact: Mark live objects, move them together, and reclaim the remaining space. This reduces fragmentation but requires moving objects and updating references.
+	- Copying or evacuation: Copy live objects out of a selected region into another region, then reclaim the whole source region. This works well when most objects in the source area are dead, but requires free destination space.
+	Collectors often combine techniques. The algorithm used for one part of a collection may differ from another part.
+	
+	4. What the major HotSpot collectors optimize
+	Parallel GC uses multiple GC threads and generally pauses application threads while it collects. Its main goal is throughput: finish application work quickly overall. It can be a good fit when longer pauses are acceptable.
+
+	G1 GC is the default collector in many Java 17 server configurations. It divides the heap into regions rather than using one contiguous young area and one contiguous old area. It collects young regions, then can select some old regions for mixed collections, prioritizing regions expected to yield more space for the collection effort.
+
+	G1 also does concurrent marking. It uses Snapshot-At-The-Beginning (SATB): conceptually, it tracks what was live when marking began. Objects that become unreachable during the marking cycle can conservatively remain considered live until a later cycle. During evacuation pauses, G1 copies live objects out of selected regions. Its policy tries to meet a pause-time goal, but that is a goal, not a hard guarantee. Oracle’s G1 guide
+
+	ZGC in Java 17 does most expensive work concurrently with the application, aiming for very short pauses. It trades some CPU and memory overhead for lower pause times. ZGC’s design and generational support have changed across Java versions, so distinguish Java 17 behavior from newer releases. Oracle’s Java 17 ZGC guide
+	
+	5. How GC policy decides what to do
+	The JVM makes decisions based on conditions such as allocation rate, heap occupancy, available headroom, and the collector’s goals. A high allocation rate can trigger frequent young collections. If the live set is large or the heap has too little free space, the collector may struggle to reclaim space quickly enough.
+
+	The main trade-offs are:
+	- Throughput: How much time remains for application work.
+	- Pause time: How long application threads are stopped for GC work.
+	- Footprint: How much memory the process uses.
+	- Headroom: How much free space is available while concurrent GC work is in progress.
+	Concurrent collectors still use pauses for some phases. “Concurrent” does not mean “no pauses.” For example, G1 has stop-the-world pauses as well as concurrent phases. Collector guidance is a starting point; workload measurements should decide the choice. Oracle’s collector selection guidance
+	
+	6. What to examine in production and how we collect GC logs?
+		For Java 9 and later (including Java 17), add a unified logging option when starting the application:
+			java -Xlog:gc*:file=gc.log:time,uptime,level,tags:filecount=5,filesize=20M -jar myapp.jar
+		This writes detailed GC logs to gc.log and rotates the file, keeping up to five log files of about 20 MB each. Put the option before -jar and the application name. The file is created relative to the application’s working directory unless you specify a full path. Oracle Java launcher documentation
+
+		For Java 8, use the older logging options:
+			java -Xloggc:gc.log -XX:+PrintGCDetails -XX:+PrintGCDateStamps -XX:+UseGCLogFileRotation -XX:NumberOfGCLogFiles=5 -XX:GCLogFileSize=20M -jar myapp.jar
+		GC logging options differ between Java versions: Java 9 introduced the unified logging system, so use the Java 8 form only when running Java 8.
+	Start with GC logs and correlate them with application latency:
+	- Collection type and cause
+	- Pause duration and frequency
+	- Heap occupancy before and after collection
+	- Allocation rate and promotion into old space
+	- Whether the post-GC live set keeps growing
+	- Full GC events or evacuation failures
+	If frequent collections reclaim plenty of memory, allocation pressure may be the issue. If the heap stays near full after collection, investigate a large live set, retained objects, or a leak. For Java 17, unified GC logging can be enabled with -Xlog:gc*.
+
+	In an interview, a strong summary is: the collector finds live objects from roots, reclaims unreachable objects using strategies such as copying or compaction, and applies policies to balance throughput, pauses, and memory footprint. The right collector and settings depend on measured workload behavior.
+	
+22. SOLID principles in Java.
 
 	SOLID is a set of five principles for designing maintainable, flexible object-oriented software.
 
@@ -993,3 +1143,380 @@
 	LSP: Subtypes should honor the behavior of their parent types.
 	ISP: Prefer small, focused interfaces.
 	DIP: Depend on abstractions, not concrete implementations.
+	
+	
+
+
+DataBase related questions:
+============================
+1. Suppose there are billions of records in the database. Our API is doing pagination and fetching 1000 records at a time. How will you optimize this such that database not get loaded.
+	Think of a database table as a very large ordered list of rows. Pagination asks the database for one portion of that list at a time.
+
+	LIMIT AND OFFSET
+
+	LIMIT says how many rows to return. OFFSET says how many rows to skip first.
+		-- First page: return 1,000 rows, skipping none
+		SELECT id, name
+		FROM employees
+		ORDER BY id
+		LIMIT 1000 OFFSET 0;
+
+	-- Second page: skip the first 1,000, then return 1,000
+		SELECT id, name
+		FROM employees
+		ORDER BY id
+		LIMIT 1000 OFFSET 1000;
+	The problem appears on later pages. To return page 1,000, the database may need to find and skip roughly 999,000 rows before returning the next 1,000. The API only receives 1,000 rows, but the database has done work on many more. Large offsets can therefore make later pages slower and add database load.
+
+	KEYSET (CURSOR) PAGINATION
+
+	Instead of telling the database how many rows to skip, tell it the value of the last row you received. The database can use an index to look up the next rows after that value.
+		-- First page
+		SELECT id, name
+		FROM employees
+		ORDER BY id
+		LIMIT 1000;
+
+	-- Suppose the last row from that page has id 1000.
+		-- Request the next page:
+		SELECT id, name
+		FROM employees
+		WHERE id > 1000
+		ORDER BY id
+		LIMIT 1000;
+	
+	The API keeps the last ID as a cursor. It sends that cursor with the next-page request. The database starts after that ID instead of scanning and discarding earlier pages.
+
+	For this to work well, id should be indexed and the ordering should be stable. A primary key is usually indexed automatically.
+
+	WHEN SORTING BY A NON-UNIQUE COLUMN
+
+	Suppose many employees share the same created_at timestamp. Use a unique tie-breaker, such as id, so the order is unambiguous:
+	SELECT id, name, created_at
+	FROM employees
+	WHERE created_at > :last_created_at
+	   OR (created_at = :last_created_at AND id > :last_id)
+	ORDER BY created_at, id
+	LIMIT 1000;
+	The matching index would generally start with the filter and sorting columns, for example:
+	CREATE INDEX employees_created_id_idx
+	ON employees (created_at, id);
+	The exact index depends on the database and the rest of the query. Check the query plan with EXPLAIN.
+
+	WHAT ELSE REDUCES LOAD?
+	- Return only the columns the API needs; avoid SELECT *.
+	- Use a page size the application and database can handle. Fetching 1,000 rows each time may be more than the client needs.
+	- Avoid calculating the exact total number of rows on every page unless the product requires it.
+	- For a full export, process rows in a background job in batches, and limit how quickly batches are read.
+	- Monitor query time and database load; pagination reduces the amount returned per request, but the database still has to read the requested rows.
+	In short: LIMIT/OFFSET means “skip N rows, then return this many.” Cursor pagination means “continue after this last-seen key,” which usually avoids the growing skip cost on deep pages.
+	
+2. What is database sharding?
+	Database sharding splits a large dataset horizontally across multiple database servers, called shards. Each shard stores a subset of the rows.
+
+	For example, an orders table could be split by customer_id:
+	- Shard 1 stores customers with IDs in one range.
+	- Shard 2 stores customers with IDs in another range.
+	- Shard 3 stores another range.
+	The application or a routing layer uses the shard key (customer_id) to send each query to the right shard.
+
+	Sharding can spread storage and query load across servers, but it adds complexity: queries across shards, rebalancing data, and transactions involving multiple shards are harder. A poor shard key can also make some shards much busier than others.
+
+3. What is databse partioning?
+	Database partitioning divides a large table into smaller parts called partitions. The database can manage and access those parts separately, while queries still use the table as one logical table.
+
+	For example, an orders table could be partitioned by order date:
+	- One partition for orders from 2024
+	- One partition for orders from 2025
+	- One partition for orders from 2026
+	A query for orders from 2026 may scan only the 2026 partition. This is called partition pruning. It can reduce the data scanned and make tasks such as deleting old data easier, but it does not automatically speed up every query. The partition key and query filters need to align.
+
+	Common partitioning types include:
+	- Range: Values fall within ranges, such as dates or ID ranges.
+	- List: Rows are assigned based on specific values, such as region.
+	- Hash: A hash function distributes rows across a fixed number of partitions.
+	Partitions are usually within the same database system. Sharding distributes data across separate database servers.
+	
+4. What is database indexing?
+	A database index is a data structure that helps the database find rows without scanning the entire table. It works like the index at the back of a book: look up a value, then use its reference to locate the matching row.
+
+	For example, if an API often searches employees by email, an index on that column can help:
+		REATE INDEX idx_employee_email ON employees(email);
+	
+	Then a query like this may use the index:
+		SELECT id, name
+		FROM employees
+		WHERE email = 'asha@example.com';
+	
+	Indexes can make reads and sorting faster, but they use storage and add work to inserts, updates, and deletes because the index must also be maintained. Index the columns your common queries filter, join, or sort by, and check the query plan to confirm the database uses the index.
+
+5. Find the 2nd largest salary of employee in database?
+	Method 1: Since all salaries are distinct, sort them from highest to lowest and skip the highest one:
+		SELECT salary
+		FROM employees
+		ORDER BY salary DESC
+		OFFSET 1 ROW
+		FETCH NEXT 1 ROW ONLY;
+	
+	Method 2: 
+		SELECT salary
+		FROM employees
+		ORDER BY salary DESC
+		LIMIT 1 OFFSET 1;
+	
+	Method 3: 
+		SELECT MAX(salary) AS second_highest_salary
+		FROM employees
+		WHERE salary < (SELECT MAX(salary) FROM employees);
+		
+	Note: To find the N-th highest distinct salary, use DENSE_RANK():
+		SELECT salary
+		FROM (
+			SELECT salary, DENSE_RANK() OVER (ORDER BY salary DESC) AS salary_rank
+			FROM employees
+		) ranked
+		WHERE salary_rank = :n;
+	Replace :n with the desired rank, such as 3 for the third-highest salary. DENSE_RANK() handles duplicate salaries by assigning the same rank to each one. Since you said salaries are distinct, ROW_NUMBER() would also work.
+	
+	The query ranks salaries from highest to lowest, then selects the row with the requested rank:
+	SELECT salary
+	FROM (
+		SELECT salary, DENSE_RANK() OVER (ORDER BY salary DESC) AS salary_rank
+		FROM employees
+	) ranked
+	WHERE salary_rank = :n;
+	How it works:
+	1. The inner query reads each salary and sorts them in descending order: highest first.
+	2. DENSE_RANK() assigns a rank: highest salary gets rank 1, next distinct salary gets rank 2, and so on.
+	3. The inner query is given the alias ranked.
+	4. The outer query returns the salary whose rank matches :n.
+	Example, with salaries 100000, 90000, 90000, and 80000:
+	salary    salary_rank
+	100000    1
+	90000     2
+	90000     2
+	80000     3
+	If :n is 3, the result is 80000. DENSE_RANK() gives tied salaries the same rank without skipping the next rank. Since your salaries are distinct, each salary gets its own rank.
+
+	:n is a parameter placeholder; the exact syntax for supplying it depends on your database or application.
+	
+5. How Joins works in SQL?
+	SQL JOINS WITH EXAMPLES
+
+	A JOIN combines rows from two tables using a related column.
+
+	SAMPLE TABLES
+
+	Employees
+
+	employee_id | name | department_id | manager_id
+	1 | Mira | 10 | NULL
+	2 | Arun | 20 | 1
+	3 | Zoe  | 40 | 1
+
+	Departments
+
+	department_id | department_name
+	10 | Engineering
+	20 | HR
+	30 | Sales
+	
+	1. INNER JOIN
+		Returns only rows where the join condition matches in both tables.
+		SELECT e.name, d.department_name
+		FROM Employees e
+		INNER JOIN Departments d
+			ON e.department_id = d.department_id;
+		Result:
+
+		name | department_name
+		Mira | Engineering
+		Arun | HR
+
+		Zoe is excluded because department 40 does not exist in Departments. Sales is excluded because no employee belongs to department 30.
+	2. LEFT JOIN
+
+		Returns every row from the left table (Employees) and matching rows from the right table (Departments). Unmatched department columns are NULL.
+		SELECT e.name, d.department_name
+		FROM Employees e
+		LEFT JOIN Departments d
+			ON e.department_id = d.department_id;
+		Result:
+
+		name | department_name
+		Mira | Engineering
+		Arun | HR
+		Zoe  | NULL
+
+	3. RIGHT JOIN
+		Returns every row from the right table (Departments) and matching rows from the left table (Employees). Unmatched employee columns are NULL.
+		SELECT e.name, d.department_name
+		FROM Employees e
+		RIGHT JOIN Departments d
+			ON e.department_id = d.department_id;
+		Result:
+
+		name | department_name
+		Mira | Engineering
+		Arun | HR
+		NULL | Sales
+
+	4. FULL OUTER JOIN
+		Returns matching rows, plus unmatched rows from both tables. Missing values are returned as NULL. Some databases, such as MySQL, do not support FULL OUTER JOIN directly.
+		SELECT e.name, d.department_name
+		FROM Employees e
+		FULL OUTER JOIN Departments d
+			ON e.department_id = d.department_id;
+		Result:
+
+		name | department_name
+		Mira | Engineering
+		Arun | HR
+		Zoe  | NULL
+		NULL | Sales
+
+	5. CROSS JOIN
+		Returns every possible combination of rows from both tables. Here, 3 employees multiplied by 3 departments gives 9 rows.
+		SELECT e.name, d.department_name
+		FROM Employees e
+		CROSS JOIN Departments d;
+		Partial result:
+
+		name | department_name
+		Mira | Engineering
+		Mira | HR
+		Mira | Sales
+		Arun | Engineering
+		Arun | HR
+		Arun | Sales
+		Zoe  | Engineering
+		Zoe  | HR
+		Zoe  | Sales
+
+	6. SELF JOIN
+		Joins a table to itself. Use it when rows in a table refer to other rows in that same table, such as employees referring to their managers.
+		SELECT e.name AS employee_name,
+			   m.name AS manager_name
+		FROM Employees e
+		LEFT JOIN Employees m
+			ON e.manager_id = m.employee_id;
+		Result:
+
+		employee_name | manager_name
+		Mira | NULL
+		Arun | Mira
+		Zoe  | Mira
+
+	QUICK SUMMARY
+
+		INNER JOIN: Only matching rows.
+		LEFT JOIN: All rows from the left table, plus matches from the right.
+		RIGHT JOIN: All rows from the right table, plus matches from the left.
+		FULL OUTER JOIN: All rows from both tables, matched where possible.
+		CROSS JOIN: Every combination of rows.
+		SELF JOIN: A table joined to itself.
+		
+6. What are ACID properties in JDBC?
+	ACID describes the guarantees a database transaction aims to provide.
+
+	Example: transferring 100 dollars from Account A to Account B.
+
+	A - ATOMICITY
+	The transaction succeeds completely or not at all. If the debit succeeds but the credit fails, the database rolls back the debit.
+
+	C - CONSISTENCY
+	A transaction takes the database from one valid state to another. For example, database rules such as constraints must still be satisfied after the transfer. The application’s transaction logic must also preserve business rules.
+
+	I - ISOLATION
+	Concurrent transactions should not interfere in ways that produce invalid results. The degree of isolation is controlled by the transaction isolation level.
+
+	D - DURABILITY
+	After a transaction commits, its changes should survive a crash, subject to the database’s durability configuration.
+
+7. What are transaction isolation levels?
+	Isolation levels control what one transaction can see while other transactions are running. The SQL standard defines four levels:
+
+	1. READ UNCOMMITTED
+	   A transaction may read another transaction’s uncommitted changes. This can cause a dirty read.
+
+	2. READ COMMITTED
+	   A transaction reads only committed data. If it reads the same row again later, another transaction may have committed a change in between. This is called a non-repeatable read.
+
+	3. REPEATABLE READ
+	   Repeated reads of the same rows remain consistent within the transaction. Depending on the database, a query may still see new matching rows, called phantoms.
+
+	4. SERIALIZABLE
+	   Provides the strongest standard isolation. Concurrent transactions should have the same effect as if they ran one at a time. The database may reject a transaction to prevent an unsafe result, so the application may need to retry it.
+
+	COMMON CONCURRENCY PROBLEMS
+
+	Dirty read: Reading changes another transaction has not committed.
+	Non-repeatable read: Reading the same row twice and getting different values.
+	Phantom read: Repeating a query and getting a different set of matching rows.
+
+	Higher isolation can reduce anomalies, but may also increase waiting, conflicts, or transaction retries. Exact behavior differs between databases. For example, PostgreSQL treats READ UNCOMMITTED as READ COMMITTED, and its REPEATABLE READ level prevents phantom reads. PostgreSQL transaction isolation documentation
+
+
+8. What is database normalization? Explain 1NF, 2NF, and 3NF?
+	DATABASE NORMALIZATION
+
+	Normalization organizes tables to reduce duplicate data and prevent insertion, update, and deletion problems.
+
+	Example starting table:
+	Enrollment(student_id, course_id, student_name, course_name, instructor_id, instructor_name, grade)
+	Assume the primary key is the combination of student_id and course_id. A student can take several courses, and each course can have several students.
+
+	1NF: FIRST NORMAL FORM
+
+		A table is in 1NF when each cell contains one value, with no lists or repeating groups.
+
+		Not in 1NF:
+
+		student_id | courses
+		101 | Java, SQL
+
+		In 1NF, store one student-course pair per row:
+
+		student_id | course_id | grade
+		101 | Java | A
+		101 | SQL | B
+
+	2NF: SECOND NORMAL FORM
+
+		A table is in 2NF when it is in 1NF and every non-key column depends on the whole primary key, not just part of a composite key.
+
+		In the Enrollment table, student_name depends only on student_id. Course name and instructor_id depend only on course_id. They do not depend on the full combination of student_id and course_id.
+
+		Split the data into:
+
+		Students(student_id, student_name)
+		Courses(course_id, course_name, instructor_id, instructor_name)
+		Enrollment(student_id, course_id, grade)
+
+		Now grade depends on the full Enrollment key: student_id plus course_id.
+
+	3NF: THIRD NORMAL FORM
+
+		A table is in 3NF when it is in 2NF and non-key columns do not depend on other non-key columns.
+
+		In Courses, instructor_name depends on instructor_id, rather than directly on course_id. This is a transitive dependency.
+
+		Split it into:
+
+		Courses(course_id, course_name, instructor_id)
+		Instructors(instructor_id, instructor_name)
+
+		The final tables are:
+
+		Students(student_id, student_name)
+		Courses(course_id, course_name, instructor_id)
+		Instructors(instructor_id, instructor_name)
+		Enrollment(student_id, course_id, grade)
+
+	SUMMARY
+
+		1NF: Each cell holds a single value; no repeating groups.
+		2NF: Every non-key column depends on the whole primary key.
+		3NF: Non-key columns depend only on the key, not on other non-key columns.
+
+		Normalization reduces duplicate data and update anomalies. It may require more joins, so some systems selectively denormalize after measuring a performance need.
