@@ -1,227 +1,67 @@
 # Java Memory Management Model - Complete Guide
 
 ## Table of Contents
-1. [Sample Java Program](#sample-java-program)
+1. [Sample Java Program](#sample-java-program-with-memory-area-annotations)
 2. [Memory Allocation Flow](#memory-allocation-flow)
 3. [Detailed Memory Breakdown](#detailed-memory-breakdown)
 4. [Step-by-Step Execution](#step-by-step-execution)
 5. [Garbage Collection](#garbage-collection)
-6. [Visual Diagrams](#visual-diagrams)
+6. [Memory Regions Quick Reference](#memory-regions-quick-reference)
+7. [Common Memory Issues](#common-memory-issues)
+8. [Memory Configuration (JVM Flags)](#memory-configuration-jvm-flags)
 
 ---
 
 ## Sample Java Program with Memory Area Annotations
 
 ```java
-// ┌─────────────────────────────────────────────────────────────┐
-// │ CLASS DEFINITION → Stored in METHOD AREA when loaded       │
-// └─────────────────────────────────────────────────────────────┘
+// Class definition -> loaded into the METHOD AREA
 public class MemoryDemo {
-    
-    // ┌───────────────────────────────────────────────────────────┐
-    // │ STATIC VARIABLE → Stored in METHOD AREA (initialized)     │
-    // │ This memory is allocated when class is loaded             │
-    // │ Exists for lifetime of JVM                                │
-    // └───────────────────────────────────────────────────────────┘
+
+    // Static variable -> METHOD AREA, initialized at class load, lives for the JVM's lifetime
     static String staticVar = "I am static";
-    
-    // ┌───────────────────────────────────────────────────────────┐
-    // │ MAIN METHOD CODE → Stored in METHOD AREA (as bytecode)    │
-    // │ When main() is called:                                    │
-    // │  - New STACK FRAME created in STACK (Thread)              │
-    // │  - All local variables will be stored on this frame       │
-    // └───────────────────────────────────────────────────────────┘
+
+    // main() bytecode -> METHOD AREA. Calling main() pushes a new frame onto the STACK.
     public static void main(String[] args) {
-        
-        // ┌─────────────────────────────────────────────────────┐
-        // │ LINE 1: Person person1 = new Person("Alice", 25);  │
-        // │                                                     │
-        // │ STACK[main]:                                        │
-        // │   person1 → [reference variable]                   │
-        // │                                                     │
-        // │ HEAP:                                              │
-        // │   @0x1000 → Person { name: @0x3000, age: 25 }     │
-        // │   @0x3000 → String "Alice"                        │
-        // │                                                     │
-        // │ METHOD AREA:                                       │
-        // │   Person.class (loaded if not already)             │
-        // └─────────────────────────────────────────────────────┘
+
+        // new Person(...) -> allocates on the HEAP; person1 (the reference) lives on the STACK
         Person person1 = new Person("Alice", 25);
-        
-        // ┌─────────────────────────────────────────────────────┐
-        // │ LINE 2: Person person2 = new Person("Bob", 30);    │
-        // │                                                     │
-        // │ STACK[main] (adds new variable):                   │
-        // │   person1 → @0x1000                               │
-        // │   person2 → [reference variable]                  │
-        // │                                                     │
-        // │ HEAP (adds new objects):                           │
-        // │   @0x2000 → Person { name: @0x4000, age: 30 }    │
-        // │   @0x4000 → String "Bob"                         │
-        // │                                                     │
-        // │ REFERENCE COUNT:                                   │
-        // │   @0x1000: 1 (person1)                            │
-        // │   @0x2000: 1 (person2)                            │
-        // └─────────────────────────────────────────────────────┘
+
+        // A second, independent object + reference pair
         Person person2 = new Person("Bob", 30);
-        
-        // ┌─────────────────────────────────────────────────────┐
-        // │ LINE 3: Person person3 = person1;                   │
-        // │                                                     │
-        // │ STACK[main] (adds new variable):                   │
-        // │   person1 → @0x1000                               │
-        // │   person2 → @0x2000                               │
-        // │   person3 → @0x1000 (SAME as person1!)            │
-        // │                                                     │
-        // │ HEAP: (No new objects created, just another ref)   │
-        // │   @0x1000: Person (still same object)             │
-        // │   @0x2000: Person (still same object)             │
-        // │                                                     │
-        // │ REFERENCE COUNT:                                   │
-        // │   @0x1000: 2 (person1 AND person3!)              │
-        // │   @0x2000: 1 (person2)                            │
-        // │                                                     │
-        // │ IMPORTANT: Same object, multiple references!      │
-        // └─────────────────────────────────────────────────────┘
+
+        // No new object here - person3 copies person1's reference, so @0x1000 now has 2 refs
         Person person3 = person1;
-        
-        // ┌─────────────────────────────────────────────────────┐
-        // │ LINE 4: person1 = null;                             │
-        // │                                                     │
-        // │ STACK[main] (modifies variable):                   │
-        // │   person1 → null (reference cleared)              │
-        // │   person2 → @0x2000                               │
-        // │   person3 → @0x1000 (still points!)               │
-        // │                                                     │
-        // │ HEAP: (Objects NOT deleted yet!)                   │
-        // │   @0x1000: Person (NOT garbage collected!)        │
-        // │           → Still referenced by person3           │
-        // │   @0x2000: Person (still referenced)              │
-        // │                                                     │
-        // │ GARBAGE COLLECTION STATUS:                         │
-        // │   @0x1000: NOT eligible (person3 refs it)         │
-        // │   @0x2000: NOT eligible (person2 refs it)         │
-        // │                                                     │
-        // │ CRITICAL: Setting to null doesn't delete object!  │
-        // │ Other references must also be cleared!             │
-        // └─────────────────────────────────────────────────────┘
+
+        // Clears only the person1 reference. @0x1000 is still reachable via person3,
+        // so it is NOT eligible for GC yet - see the reference diagram above.
         person1 = null;
-        
-        // ┌─────────────────────────────────────────────────────┐
-        // │ LINE 5: printInfo(person2);                         │
-        // │                                                     │
-        // │ STACK[main] (before call):                         │
-        // │   person1 → null                                  │
-        // │   person2 → @0x2000                               │
-        // │   person3 → @0x1000                               │
-        // │                                                     │
-        // │ NEW STACK FRAME CREATED: printInfo()              │
-        // │   STACK[printInfo]:                                │
-        // │     p → @0x2000 (parameter, same ref as person2)  │
-        // │                                                     │
-        // │ HEAP: (No changes)                                 │
-        // │   Person objects still there, still referenced     │
-        // │                                                     │
-        // │ METHOD AREA:                                       │
-        // │   printInfo() method bytecode executed             │
-        // └─────────────────────────────────────────────────────┘
+
+        // Passes the person2 reference by value into a new STACK frame for printInfo()
         printInfo(person2);
-        
-        // ┌─────────────────────────────────────────────────────┐
-        // │ END OF main() METHOD:                               │
-        // │                                                     │
-        // │ STACK[main] is FREED                               │
-        // │   person1, person2, person3 variables → GONE       │
-        // │                                                     │
-        // │ HEAP ANALYSIS - Garbage Collection:                │
-        // │   @0x1000: Person                                  │
-        // │     - person3 was on stack (now freed)            │
-        // │     - NO REFERENCES → GARBAGE COLLECTED            │
-        // │                                                     │
-        // │   @0x2000: Person                                  │
-        // │     - person2 was on stack (now freed)            │
-        // │     - NO REFERENCES → GARBAGE COLLECTED            │
-        // │                                                     │
-        // │   @0x3000, @0x4000: String objects                │
-        // │     - NO REFERENCES → GARBAGE COLLECTED            │
-        // │                                                     │
-        // │ RESULT: All heap objects freed, memory reclaimed   │
-        // └─────────────────────────────────────────────────────┘
+
+        // main() returns -> its stack frame (and every local reference) is freed.
+        // @0x1000, @0x2000, @0x3000, @0x4000 are now all unreachable -> eligible for GC.
     }
-    
-    // ┌───────────────────────────────────────────────────────────┐
-    // │ METHOD CODE → Stored in METHOD AREA (as bytecode)         │
-    // │ Parameter 'p' will be on STACK when method is called      │
-    // │ Local execution happens in STACK FRAME                    │
-    // └───────────────────────────────────────────────────────────┘
+
+    // printInfo()'s bytecode -> METHOD AREA; parameter p -> STACK, Person object -> HEAP
     static void printInfo(Person p) {
-        // ┌─────────────────────────────────────────────────────┐
-        // │ STACK[printInfo]:                                   │
-        // │   p → @0x2000 (reference to Person object)        │
-        // │                                                     │
-        // │ HEAP:                                              │
-        // │   @0x2000 → Person { name: "Bob", age: 30 }      │
-        // │          (accessed through 'p' reference)          │
-        // │                                                     │
-        // │ When println executes, it follows:                 │
-        // │   p (STACK) → @0x2000 (HEAP) → access name, age   │
-        // └─────────────────────────────────────────────────────┘
         System.out.println("Name: " + p.name + ", Age: " + p.age);
-        
-        // ┌─────────────────────────────────────────────────────┐
-        // │ RETURN from printInfo:                              │
-        // │   STACK[printInfo] is FREED                        │
-        // │   Parameter 'p' is REMOVED from stack              │
-        // │   Control returns to main()                         │
-        // │   main() stack frame is still active                │
-        // └─────────────────────────────────────────────────────┘
+        // Returning here frees printInfo()'s stack frame; p is removed, control returns to main()
     }
 }
 
-// ┌─────────────────────────────────────────────────────────────┐
-// │ CLASS DEFINITION → Stored in METHOD AREA when loaded       │
-// │ Instance variables part of class structure (METHOD AREA)   │
-// │ But each INSTANCE of Person has its own values on HEAP     │
-// └─────────────────────────────────────────────────────────────┘
+// Class definition -> METHOD AREA. The field *blueprint* is shared; each Person
+// *instance*'s actual name/age values live on the HEAP, one copy per object.
 class Person {
-    
-    // ┌─────────────────────────────────────────────────────────┐
-    // │ INSTANCE VARIABLES (Field Declarations)               │
-    // │ Blueprint stored in METHOD AREA                       │
-    // │ Actual values stored in HEAP (with each object)       │
-    // │                                                       │
-    // │ Every Person object on HEAP contains:                │
-    // │   - name: String reference (4-8 bytes for ref)      │
-    // │   - age: int primitive value (4 bytes)              │
-    // └─────────────────────────────────────────────────────────┘
-    String name;     // Instance variable
-    int age;         // Instance variable
-    
-    // ┌─────────────────────────────────────────────────────────┐
-    // │ CONSTRUCTOR CODE → Stored in METHOD AREA (bytecode)    │
-    // │ When Person() is called:                              │
-    // │   1. Object allocated on HEAP                         │
-    // │   2. Constructor code (from METHOD AREA) executed    │
-    // │   3. STACK has 'this' reference + parameters        │
-    // │   4. Instance variables initialized                  │
-    // └─────────────────────────────────────────────────────────┘
+    String name;
+    int age;
+
+    // Constructor bytecode -> METHOD AREA. Running it: allocate on HEAP, bind 'this'
+    // + parameters on the STACK, then copy the parameter values into the heap object's fields.
     Person(String name, int age) {
-        // ┌──────────────────────────────────────────────────┐
-        // │ STACK[Person constructor]:                       │
-        // │   this → @0x1000 (new Person object)            │
-        // │   name → reference to String (from caller)      │
-        // │   age → 25 or 30 (primitive value)              │
-        // │                                                  │
-        // │ HEAP[@0x1000]:                                  │
-        // │   name field ← string reference (assigned)      │
-        // │   age field ← int value (assigned)              │
-        // │                                                  │
-        // │ METHOD AREA:                                    │
-        // │   this.name assignment (bytecode)              │
-        // │   this.age assignment (bytecode)               │
-        // └──────────────────────────────────────────────────┘
-        this.name = name;  // Assign String ref from parameter to heap object
-        this.age = age;    // Assign int value from parameter to heap object
+        this.name = name;
+        this.age = age;
     }
 }
 ```
@@ -249,50 +89,12 @@ class Person {
 
 ### Overall JVM Memory Structure
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                       JVM Runtime Memory                        │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  ┌──────────────────────┐                                       │
-│  │   METHOD AREA        │  (Shared across all threads)          │
-│  │  ┌────────────────┐  │                                       │
-│  │  │ Class Structs  │  │  - Person.class structure             │
-│  │  │ Method Code    │  │  - MemoryDemo.class structure         │
-│  │  │ Constant Pool  │  │  - "I am static" string literal      │
-│  │  │ Static Vars    │  │  - staticVar = "I am static"          │
-│  │  └────────────────┘  │                                       │
-│  └──────────────────────┘                                       │
-│                                                                 │
-│  ┌──────────────────────┐                                       │
-│  │      HEAP            │  (Shared across all threads, GC here) │
-│  │  ┌────────────────┐  │                                       │
-│  │  │  Person Obj 1  │  │  @0x1000  [name="Alice", age=25]      │
-│  │  │  Person Obj 2  │  │  @0x2000  [name="Bob", age=30]        │
-│  │  │  String "Alice"│  │  @0x3000                              │
-│  │  │  String "Bob"  │  │  @0x4000                              │
-│  │  └────────────────┘  │                                       │
-│  └──────────────────────┘                                       │
-│                                                                 │
-│  ┌──────────────────────┐                                       │
-│  │   STACK (main)       │  (Per thread)                         │
-│  │  ┌────────────────┐  │                                       │
-│  │  │ args: null     │  │  Reference to String[] array          │
-│  │  │ person1: ref   │  │  → points to @0x1000 (or null)        │
-│  │  │ person2: ref   │  │  → points to @0x2000                  │
-│  │  │ person3: ref   │  │  → points to @0x1000                  │
-│  │  └────────────────┘  │                                       │
-│  └──────────────────────┘                                       │
-│                                                                 │
-│  ┌──────────────────────┐                                       │
-│  │   STACK (printInfo)  │  (Per thread)                         │
-│  │  ┌────────────────┐  │                                       │
-│  │  │ p: ref         │  │  → points to @0x2000                  │
-│  │  └────────────────┘  │                                       │
-│  └──────────────────────┘                                       │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
-```
+![JVM memory structure overview](jmm-memory-structure.svg)
+
+- **Method area** (shared across all threads): class structures for `Person` and `MemoryDemo`, method bytecode, the constant pool, and `staticVar = "I am static"`.
+- **Heap** (shared across all threads, GC-managed): `Person` objects at `@0x1000`/`@0x2000` and the `String` objects they reference at `@0x3000`/`@0x4000`.
+- **Stack (main)** (per thread): `person1`, `person2`, `person3` references, each pointing into the heap (or `null`).
+- **Stack (printInfo)** (per thread, created only while that method is executing): parameter `p`, pointing at the same heap object as `person2`.
 
 ---
 
@@ -303,97 +105,38 @@ class Person {
 **When Allocated**: At class loading time  
 **Freed**: When JVM shuts down or class is unloaded
 
-```
-┌────────────────────────────────────────┐
-│         METHOD AREA (Metaspace)        │
-├────────────────────────────────────────┤
-│ Class: Person                          │
-│   - Fields: String name, int age       │
-│   - Constructor: Person(String, int)   │
-│   - Code stored as bytecode            │
-├────────────────────────────────────────┤
-│ Class: MemoryDemo                      │
-│   - Static var: staticVar              │
-│   - Methods: main(), printInfo()       │
-├────────────────────────────────────────┤
-│ Static Variables (initialized)         │
-│   staticVar → "I am static" (@heap)    │
-├────────────────────────────────────────┤
-│ String Literal Pool                    │
-│   "Alice" (if used multiple times)     │
-│   "Bob"                                │
-│   "I am static"                        │
-└────────────────────────────────────────┘
-```
+| Region | Contents |
+|---|---|
+| Class `Person` | Fields `String name`, `int age`; constructor `Person(String, int)`; bytecode |
+| Class `MemoryDemo` | Static var `staticVar`; methods `main()`, `printInfo()` |
+| Static variables | `staticVar → "I am static"` (the reference lives here, the `String` object itself is on the heap) |
+| String literal pool | `"Alice"`, `"Bob"`, `"I am static"` |
 
 ### 2. HEAP (Objects)
 **Location**: Shared across all threads  
 **When Allocated**: When `new` keyword is used  
 **Freed**: By Garbage Collector when no references exist
 
-```
-┌────────────────────────────────────────┐
-│            HEAP (Garbage Collected)    │
-├────────────────────────────────────────┤
-│                                        │
-│  @0x1000: Person Object               │
-│  ┌──────────────────┐                 │
-│  │ name → @0x3000  │ (String ref)     │
-│  │ age  → 25       │ (primitive)      │
-│  └──────────────────┘                 │
-│                                        │
-│  @0x2000: Person Object               │
-│  ┌──────────────────┐                 │
-│  │ name → @0x4000  │ (String ref)     │
-│  │ age  → 30       │ (primitive)      │
-│  └──────────────────┘                 │
-│                                        │
-│  @0x3000: String Object               │
-│  ┌──────────────────┐                 │
-│  │ value: "Alice"  │                 │
-│  │ length: 5       │                  │
-│  └──────────────────┘                 │
-│                                        │
-│  @0x4000: String Object               │
-│  ┌──────────────────┐                 │
-│  │ value: "Bob"    │                 │
-│  │ length: 3       │                  │
-│  └──────────────────┘                 │
-│                                        │
-└────────────────────────────────────────┘
-```
+| Address | Object | Fields |
+|---|---|---|
+| `@0x1000` | `Person` | `name → @0x3000` (ref), `age = 25` (primitive) |
+| `@0x2000` | `Person` | `name → @0x4000` (ref), `age = 30` (primitive) |
+| `@0x3000` | `String` | `value = "Alice"`, `length = 5` |
+| `@0x4000` | `String` | `value = "Bob"`, `length = 3` |
+
+See §"Garbage Collection" below for how and when these get reclaimed.
 
 ### 3. STACK (Method Execution)
 **Location**: Per thread (separate for each thread)  
 **When Allocated**: When method is called  
 **Freed**: When method returns
 
-```
-STACK FRAME: main() method
-┌──────────────────────────────────┐
-│ Local Variables:                 │
-│                                  │
-│ args ──→ @0x5000 (String[])     │
-│ person1 ──→ @0x1000 (Person)    │
-│ person2 ──→ @0x2000 (Person)    │
-│ person3 ──→ @0x1000 (Person)    │
-│                                  │
-│ Method Info:                     │
-│ - Return Address: Line after     │
-│   main() call                    │
-│ - Local Variables Count: 4       │
-└──────────────────────────────────┘
-         ↓ (when printInfo called)
-STACK FRAME: printInfo() method
-┌──────────────────────────────────┐
-│ Local Variables:                 │
-│                                  │
-│ p ──→ @0x2000 (Person)          │
-│                                  │
-│ Method Info:                     │
-│ - Return Address: Line 5         │
-└──────────────────────────────────┘
-```
+Each method call pushes a new **stack frame** holding its local variables and a return address; the frame is popped the instant the method returns.
+
+| Frame | Local variables | Return address |
+|---|---|---|
+| `main()` | `args → @0x5000`, `person1 → @0x1000`, `person2 → @0x2000`, `person3 → @0x1000` | — (JVM entry point) |
+| `printInfo()` (pushed on top while `main()` is calling it) | `p → @0x2000` | line 5 of `main()` |
 
 ---
 
@@ -403,254 +146,132 @@ STACK FRAME: printInfo() method
 
 #### **Line 1: `Person person1 = new Person("Alice", 25);`**
 
-```
-STEP 1: Class Loader loads Person.class (if not already loaded)
-        → METHOD AREA now has Person class structure
-
-STEP 2: Create String "Alice"
-        HEAP: @0x3000 → String("Alice")
-
-STEP 3: Create Person object
-        HEAP: @0x1000 → Person {name: @0x3000, age: 25}
-
-STEP 4: Store reference on STACK
-        STACK[main]: person1 = @0x1000
-
-MEMORY STATE:
-┌─ METHOD AREA ─────────┐
-│ Person.class loaded   │
-│ staticVar = @heap     │
-└───────────────────────┘
-          
-┌─ HEAP ────────────────┐
-│ @0x1000: Person       │
-│   name → @0x3000      │
-│   age → 25            │
-│ @0x3000: "Alice"      │
-└───────────────────────┘
-
-┌─ STACK (main) ────────┐
-│ person1 → @0x1000     │
-└───────────────────────┘
-```
+1. Class loader loads `Person.class` (if not already loaded) → method area now has the `Person` class structure.
+2. Create `String "Alice"` → heap `@0x3000`.
+3. Create `Person` object → heap `@0x1000 → Person {name: @0x3000, age: 25}`.
+4. Store the reference on the stack → `STACK[main]: person1 = @0x1000`.
 
 #### **Line 2: `Person person2 = new Person("Bob", 30);`**
 
-```
-STEP 1: Create String "Bob"
-        HEAP: @0x4000 → String("Bob")
+1. Create `String "Bob"` → heap `@0x4000`.
+2. Create `Person` object → heap `@0x2000 → Person {name: @0x4000, age: 30}`.
+3. Store the reference on the stack → `STACK[main]: person2 = @0x2000`.
 
-STEP 2: Create Person object
-        HEAP: @0x2000 → Person {name: @0x4000, age: 30}
-
-STEP 3: Store reference on STACK
-        STACK[main]: person2 = @0x2000
-
-MEMORY STATE:
-┌─ HEAP ────────────────┐
-│ @0x1000: Person       │  ← person1
-│   name → @0x3000      │
-│   age → 25            │
-│ @0x2000: Person       │  ← person2
-│   name → @0x4000      │
-│   age → 30            │
-│ @0x3000: "Alice"      │
-│ @0x4000: "Bob"        │
-└───────────────────────┘
-
-┌─ STACK (main) ────────┐
-│ person1 → @0x1000     │
-│ person2 → @0x2000     │
-└───────────────────────┘
-```
+Heap now holds two independent `Person` objects; the stack holds two independent references.
 
 #### **Line 3: `Person person3 = person1;`**
 
-```
-STEP 1: Read value of person1 reference (@0x1000)
+1. Read the value of the `person1` reference (`@0x1000`) — not the object itself.
+2. Assign that same reference to `person3` → `STACK[main]: person3 = @0x1000`.
 
-STEP 2: Assign same reference to person3
-        STACK[main]: person3 = @0x1000
-
-MEMORY STATE:
-┌─ HEAP ────────────────┐
-│ @0x1000: Person       │  ← person1 & person3
-│   name → @0x3000      │    (both point here)
-│   age → 25            │
-│ @0x2000: Person       │  ← person2
-│   name → @0x4000      │
-│   age → 30            │
-│ @0x3000: "Alice"      │
-│ @0x4000: "Bob"        │
-└───────────────────────┘
-
-┌─ STACK (main) ────────┐
-│ person1 → @0x1000     │
-│ person2 → @0x2000     │
-│ person3 → @0x1000     │
-└───────────────────────┘
-    REFERENCE COUNT:
-    @0x1000: 2 references (person1, person3)
-    @0x2000: 1 reference (person2)
-```
+No new object is created. `@0x1000` now has **2 references** (`person1`, `person3`); `@0x2000` still has 1 (`person2`).
 
 #### **Line 4: `person1 = null;`**
 
-```
-STEP 1: Null out person1 reference
-        STACK[main]: person1 = null
+1. Clear the `person1` reference → `STACK[main]: person1 = null`.
 
-MEMORY STATE:
-┌─ STACK (main) ────────┐
-│ person1 → null        │
-│ person2 → @0x2000     │
-│ person3 → @0x1000     │
-└───────────────────────┘
+`@0x1000` drops to **1 reference** (`person3`) — still alive and **not** eligible for GC. `@0x2000` is unaffected (still 1 reference, `person2`). Setting a variable to `null` only clears *that* reference; the object survives as long as any other reference remains, as shown below:
 
-REFERENCE COUNT UPDATE:
-@0x1000: 1 reference (person3) ← Still alive!
-@0x2000: 1 reference (person2)
-
-IMPORTANT: Object @0x1000 is NOT garbage collected yet
-because person3 still references it!
-```
+![Stack references into the heap after person1 is nulled](jmm-references.svg)
 
 #### **Line 5: `printInfo(person2);`**
 
-```
-STEP 1: Call printInfo(person2)
-        Create new STACK FRAME for printInfo()
+1. Call `printInfo(person2)` → a new stack frame is pushed for `printInfo()`.
+2. The reference is passed by value → `STACK[printInfo]: p = @0x2000` (same address as `person2`, a second reference to the *same* object).
+3. Inside `printInfo`, `p.name` / `p.age` follow the reference from stack → heap → object fields.
+4. Output: `Name: Bob, Age: 30`.
 
-STEP 2: Pass reference to person2
-        STACK[printInfo]: p = @0x2000
+The heap is unchanged by this call — `printInfo` only reads through an additional reference to the existing `@0x2000` object.
 
-STEP 3: Inside printInfo, access p.name and p.age
-        Follow reference from stack → heap → object fields
+#### **After main() Returns**
 
-MEMORY STATE (during printInfo):
-┌─ STACK (main) ────────┐
-│ person1 → null        │
-│ person2 → @0x2000     │
-│ person3 → @0x1000     │
-└───────────────────────┘
-         ↓ (call stack)
-┌─ STACK (printInfo) ───┐
-│ p → @0x2000           │
-└───────────────────────┘
-
-HEAP: (unchanged)
-┌─ HEAP ────────────────┐
-│ @0x1000: Person("Alice")
-│ @0x2000: Person("Bob") ← accessed via p
-│ @0x3000: "Alice"
-│ @0x4000: "Bob"
-└───────────────────────┘
-
-OUTPUT: Name: Bob, Age: 30
-```
-
-#### **After main() Returns (Garbage Collection)**
-
-```
-STEP 1: printInfo() returns
-        STACK[printInfo] is freed
-
-STEP 2: main() returns
-        STACK[main] is freed (all local variables gone)
-
-STEP 3: Garbage Collector runs (automatic)
-        Check for unreferenced objects:
-        
-        REFERENCE ANALYSIS:
-        @0x1000 → 0 references (no variable points to it)
-                  MARKED FOR DELETION
-        @0x2000 → 0 references (no variable points to it)
-                  MARKED FOR DELETION
-        @0x3000 → 0 references (no variable points to it)
-                  MARKED FOR DELETION
-        @0x4000 → 0 references (no variable points to it)
-                  MARKED FOR DELETION
-
-STEP 4: Sweep Phase
-        All unreferenced objects deleted from HEAP
-        Memory reclaimed and available for new objects
-
-FINAL MEMORY STATE:
-┌─ HEAP ────────────────┐
-│ (Empty - all freed)   │
-└───────────────────────┘
-
-┌─ METHOD AREA ─────────┐
-│ Person.class (still)  │  ← Remains loaded
-│ MemoryDemo.class      │
-│ staticVar (still)     │
-└───────────────────────┘
-```
+1. `printInfo()` returns → its stack frame (`p`) is freed.
+2. `main()` returns → its stack frame (`person1`, `person2`, `person3`) is freed — every reference that ever pointed into the heap is now gone.
+3. With no GC roots pointing at them, `@0x1000`, `@0x2000`, `@0x3000`, and `@0x4000` are all unreachable.
+4. The next garbage collection cycle reclaims all four — see the **Garbage Collection** section below for exactly how (mark/sweep/compact, and which generation each object would actually be sitting in by this point).
 
 ---
 
-## Garbage Collection Process
+## Garbage Collection
 
-### Mark & Sweep Algorithm
+Garbage collection (GC) is the JVM automatically reclaiming heap memory occupied by objects that the running program can no longer reach. There's no manual `free()` — the tradeoff is occasional, unpredictable pauses while the collector does its work.
 
-```
-BEFORE GC:
-┌─────────────────────────────────────────┐
-│ Reachable Objects   │ Unreachable       │
-│                     │ Objects (TRASH)   │
-│ ┌─────────────────┐ │ ┌──────────────┐ │
-│ │ person3 @0x1000│ │ │ person1:null │ │
-│ └─────────────────┘ │ │ person2:gone │ │
-│ staticVar @0x7000   │ │ Strings      │ │
-│                     │ └──────────────┘ │
-└─────────────────────────────────────────┘
+### Reachability and GC roots
 
-GARBAGE COLLECTION:
+An object is **garbage** the moment nothing reachable from a **GC root** points to it anymore — not when a variable is set to `null`, but when *every* path to it is gone (as seen in Line 4/5 above, where `@0x1000` survived `person1 = null` because `person3` still reached it).
 
-Phase 1: MARK (Identify reachable objects)
-┌────────────────────────────────────────┐
-│ Start from ROOT REFERENCES:            │
-│ - Stack variables                      │
-│ - Static variables                     │
-│ - Global references                    │
-│                                        │
-│ Traverse and mark all reachable:       │
-│ ✓ @0x1000 (reachable via person3)     │
-│ ✓ @0x3000 (reachable via @0x1000)    │
-│ ✓ @0x7000 (reachable via static var) │
-│ ✗ @0x2000 (unreachable)               │
-│ ✗ @0x4000 (unreachable)               │
-└────────────────────────────────────────┘
+GC roots are the fixed starting points the collector traces from: local variables and parameters on every thread's stack, static variables in the method area, active JNI (native) references, and objects currently locked for synchronization. Anything not reachable by following references from a root, transitively, is collectible.
 
-Phase 2: SWEEP (Delete unmarked objects)
-┌────────────────────────────────────────┐
-│ For each heap object:                  │
-│ - If marked: keep in memory            │
-│ - If not marked: deallocate            │
-│                                        │
-│ @0x1000: KEEP (marked)                │
-│ @0x2000: DELETE (not marked)          │
-│ @0x3000: KEEP (marked)                │
-│ @0x4000: DELETE (not marked)          │
-└────────────────────────────────────────┘
+### The core algorithm: Mark, Sweep, Compact
 
-Phase 3: COMPACT (Optional, moves objects)
-┌────────────────────────────────────────┐
-│ Relocate objects to reduce             │
-│ fragmentation:                         │
-│                                        │
-│ @0x1000 → @0x1000 (stays)             │
-│ @0x3000 → @0x2000 (compacted)         │
-│                                        │
-│ Update all references accordingly      │
-└────────────────────────────────────────┘
+![Mark, sweep and compact phases](jmm-gc-mark-sweep-compact.svg)
 
-AFTER GC:
-┌─────────────────────┐
-│ @0x1000: Person     │  (Reachable)
-│ @0x2000: "Alice"    │  (Compacted)
-│ Free Memory (block) │  (Available)
-└─────────────────────┘
+1. **Mark** — starting from the GC roots, traverse every reference and mark each object reached as live. Anything left unmarked afterward is garbage.
+2. **Sweep** — walk the heap and reclaim the memory of every unmarked object, making it available for new allocations.
+3. **Compact** — slide the surviving (marked) objects together to eliminate the gaps sweep left behind, so free memory is one contiguous block instead of scattered fragments. This step is optional per-collector (some collectors compact, some don't, some only compact occasionally) because it costs extra CPU time to relocate objects and fix up every reference that pointed at them.
+
+This is the algorithm underneath every HotSpot collector discussed below — they differ mainly in *where* they run it (which generation), *how many threads* run it concurrently, and *whether the application has to pause* while it happens.
+
+### The generational hypothesis
+
+Nearly every real JVM collector is built on one empirical observation: **most objects die young.** Short-lived temporaries (loop variables, intermediate strings, request-scoped objects) vastly outnumber long-lived ones (caches, connection pools, singletons). So instead of scanning the *entire* heap on every collection, the heap is split into generations, and the young, short-lived one is collected far more often and far more cheaply than the old one.
+
+![Generational heap layout: young generation, old generation, metaspace](jmm-gc-heap-generations.svg)
+
+#### Young generation
+- **Eden**: where (almost) every new object is allocated. Allocation here is a simple pointer bump — very fast.
+- **Survivor spaces (S0, S1)**: two equally-sized regions; at any moment one is active and one is empty. Objects that survive a collection are copied into the empty one; the two swap roles every cycle, so one is always "to-space."
+- Sized relatively small on purpose — a small region fills up (and triggers a collection) quickly, which is fine because most of what's in it is already dead.
+
+#### Old generation (tenured)
+- Holds objects that have survived enough young-generation collections to be considered long-lived (see tenuring below), plus objects large enough to be allocated directly into the old generation.
+- Collected far less often, but a collection here is far more expensive — it's a much bigger region to mark/sweep/compact.
+
+#### Metaspace (not part of the heap)
+- Class metadata — the method area's modern implementation (replacing the old fixed-size "PermGen" since Java 8). It lives in **native memory**, not the heap, and grows dynamically (bounded by `-XX:MaxMetaspaceSize`), which is why class-loading-heavy apps (lots of dynamic proxies, app servers redeploying) used to hit `OutOfMemoryError: PermGen space` and now instead exhaust native memory if classes leak.
+
+### Minor GC and promotion (tenuring)
+
+![Minor GC and promotion flow](jmm-gc-minor-gc-promotion.svg)
+
+1. New objects are allocated in **Eden**.
+2. When Eden fills up, a **Minor GC** runs: a **stop-the-world** pause (all application threads freeze) during which every *live* object in Eden and the active survivor space is copied into the *other*, currently-empty survivor space.
+3. Each object that survives gets its **age** incremented by 1 (tracked in its object header).
+4. Once an object's age reaches the **tenuring threshold** (`-XX:MaxTenuringThreshold`, default 15, dynamically adjusted by most collectors), it is **promoted** straight into the old generation instead of being copied again.
+5. Dead objects are never copied at all — this is why minor GC is cheap: its cost is proportional to the (usually small) number of *survivors*, not to the size of Eden.
+
+### Major / Full GC
+
+A **major GC** collects the old generation (and usually implies the young generation is collected too); a **full GC** collects the *entire* heap plus, often, metaspace. Both are dramatically more expensive than a minor GC because the old generation is large and mostly made of long-lived objects, so the mark phase has far more live data to traverse. Full GCs are the main source of the "stop-the-world pause" complaints that show up in production incident reports — most GC tuning work is really about *avoiding* full GCs, not making them faster.
+
+### GC algorithms (the ones to know by name)
+
+| Collector | Approach | Pause behavior | When it's used |
+|---|---|---|---|
+| **Serial GC** (`-XX:+UseSerialGC`) | Single-threaded mark-sweep-compact for both generations | Stop-the-world, can be long | Small heaps, single-core machines, simple CLI tools |
+| **Parallel GC** (`-XX:+UseParallelGC`) | Same algorithm as Serial, but multiple threads do the marking/copying in parallel | Stop-the-world, but shorter wall-clock than Serial | Default on older JDKs; throughput-oriented batch jobs that can tolerate pauses |
+| **CMS** (`-XX:+UseConcurrentMarkSweepGC`, deprecated since Java 9, removed in Java 14) | Marks and sweeps the old generation *concurrently* with the application, pausing only briefly | Short pauses, but doesn't compact (fragmentation risk) and competes with the app for CPU | Was the standard low-pause choice before G1 matured |
+| **G1 (Garbage First)** (`-XX:+UseG1GC`, **default since Java 9**) | Splits the heap into many fixed-size regions (not one contiguous young/old split) and always collects the regions with the most garbage first | Stop-the-world but tightly bounded — you set a target with `-XX:MaxGCPauseMillis` and G1 picks how many regions to collect to hit it | The default general-purpose choice for most services today |
+| **ZGC** / **Shenandoah** (`-XX:+UseZGC`, `-XX:+UseShenandoahGC`) | Fully concurrent mark *and* compact, using colored pointers / load barriers so the app keeps running during almost all phases | Sub-millisecond pauses, largely independent of heap size | Very large heaps (10s–100s of GB) or strict latency SLAs |
+
+### G1's region-based heap
+
+![G1 region-based heap](jmm-gc-g1-regions.svg)
+
+G1's key difference from Serial/Parallel/CMS: instead of one contiguous Eden, one contiguous Survivor area, and one contiguous Old generation, the heap is divided into many equal-sized regions (typically 1–32 MB each), and each region is independently labeled Eden, Survivor, Old, or **Humongous** (for objects larger than ~50% of a region size, which skip the young generation and go straight to dedicated regions). G1 tracks how much garbage is in each region and always collects the regions with the most reclaimable garbage first — hence "Garbage First" — which is what lets it hit a target pause time instead of pausing for as long as a full generation happens to need.
+
+### Choosing / tuning a collector (quick reference)
+
+```bash
+-XX:+UseG1GC              # G1 — good general-purpose default
+-XX:+UseSerialGC          # Serial — tiny heaps / single core
+-XX:+UseParallelGC        # Parallel — throughput over latency
+-XX:+UseZGC               # ZGC — very large heap, low-latency requirement
+
+-XX:MaxGCPauseMillis=200  # G1: target pause time (a goal, not a hard guarantee)
+-XX:NewRatio=2            # Old:Young size ratio (2 → old gen is 2x young gen)
+-XX:SurvivorRatio=8       # Eden:Survivor size ratio within young gen
+-XX:MaxTenuringThreshold=15  # Max age before forced promotion to old gen
 ```
 
 ---
@@ -840,47 +461,9 @@ System.out.println("Max: " + maxMemory / 1024 / 1024 + " MB");
 
 ## Summary Diagram
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│                    COMPLETE JAVA MEMORY MODEL                │
-├──────────────────────────────────────────────────────────────┤
-│                                                              │
-│  ┌─────────────────┐          ┌──────────────────────┐      │
-│  │  Source Code    │          │  Class Loader        │      │
-│  │  MemoryDemo.java│──────→   │  Loads .class files  │      │
-│  │  Person.java    │          └──────────────────────┘      │
-│  └─────────────────┘                    ↓                   │
-│                                         │                   │
-│                                         ↓                   │
-│                        ┌────────────────────────┐            │
-│                        │   METHOD AREA          │            │
-│                        │ (Class Structures)     │            │
-│                        │ (Static Variables)     │            │
-│                        │ (Method Code)          │            │
-│                        └────────────────────────┘            │
-│                                         ↑↓                   │
-│                        ┌────────────────────────┐            │
-│                        │  EXECUTION ENGINE      │            │
-│                        │ (Interprets bytecode)  │            │
-│                        │ (JIT Compilation)      │            │
-│                        └────────────────────────┘            │
-│                         ↑                    ↓               │
-│              ┌──────────────────┐   ┌──────────────────┐    │
-│              │  STACK           │   │   HEAP           │    │
-│              │ (Variables)      │   │ (Objects)        │    │
-│              │ (References)     │   │ (GC Managed)     │    │
-│              │ (Method Frames)  │   │ (Shared)         │    │
-│              └──────────────────┘   └──────────────────┘    │
-│                                                              │
-│  ┌─────────────────────────────────────────────────────────┐│
-│  │ GARBAGE COLLECTION (Automatic Memory Management)       ││
-│  │ • Mark Phase: Identify reachable objects              ││
-│  │ • Sweep Phase: Delete unreachable objects            ││
-│  │ • Compact Phase: Relocate to reduce fragmentation    ││
-│  └─────────────────────────────────────────────────────────┘│
-│                                                              │
-└──────────────────────────────────────────────────────────────┘
-```
+![Complete Java memory model architecture](jmm-architecture-summary.svg)
+
+Source files are loaded by the class loader into the **method area**; the **execution engine** (interpreter + JIT) runs the bytecode, reading/writing thread-local **stack** frames and shared **heap** objects; the **garbage collector** reclaims heap objects no root can reach anymore, using the generational mark/sweep/compact machinery described above.
 
 ---
 
